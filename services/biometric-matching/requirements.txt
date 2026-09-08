@@ -1,2 +1,11 @@
 fastapi
 uvicorn[standard]
+pydantic
+
+# liveness + face embedding / matching
+opencv-python-headless
+numpy
+pillow
+torch
+torchvision
+face-recognition

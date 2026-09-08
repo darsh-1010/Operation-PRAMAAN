@@ -1,2 +1,10 @@
 fastapi
 uvicorn[standard]
+pydantic
+
+# image forensics / CNN-based checks
+opencv-python-headless
+numpy
+pillow
+torch
+torchvision

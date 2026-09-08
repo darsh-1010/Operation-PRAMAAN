@@ -1,2 +1,8 @@
 fastapi
 uvicorn[standard]
+pydantic
+
+# fusion model over Score A + Score B + Score C
+scikit-learn
+lightgbm
+numpy
