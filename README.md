@@ -87,3 +87,8 @@ kept separate rather than shared). `frontend/` is a separate deployable app.
 
 Per-module setup instructions live in each module's own README (TBD as modules are built).
 `docker-compose.yml` at the repo root runs everything together for local dev.
+
+## Security
+
+This system takes document/selfie uploads from the public. See [SECURITY.md](SECURITY.md)
+for the upload threat model and required guardrails before adding or changing any upload path.
