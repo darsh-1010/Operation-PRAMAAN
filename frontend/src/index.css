@@ -11,12 +11,32 @@
   --color-text-dim: #8a8fa0;
   --color-accent: #4c7cff;
   --color-accent-dim: #1f2c4d;
+  --color-accent-fg: #ffffff;
   --color-success: #22c55e;
   --color-success-dim: #14291d;
   --color-warning: #f5a623;
   --color-warning-dim: #2e2410;
   --color-danger: #ff5470;
   --color-danger-dim: #2e1620;
+}
+
+/* Light theme override — toggled by adding .light to <html> (see src/theme.ts) */
+:root.light {
+  --color-bg: #f4f5f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef0f4;
+  --color-border: #e1e3ea;
+  --color-text: #12151d;
+  --color-text-dim: #656b7a;
+  --color-accent: #3b5fe0;
+  --color-accent-dim: #e6ebfd;
+  --color-accent-fg: #ffffff;
+  --color-success: #16a34a;
+  --color-success-dim: #e5f6ea;
+  --color-warning: #b45309;
+  --color-warning-dim: #fbf0da;
+  --color-danger: #dc2626;
+  --color-danger-dim: #fbe7e9;
 }
 
 body {

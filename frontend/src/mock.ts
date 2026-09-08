@@ -1,7 +1,7 @@
 import type { Decision, ModuleResult, ScreeningCase } from './types'
 
 const NAMES = ['A. Sharma', 'R. Verma', 'S. Khan', 'P. Nair', 'J. Singh', 'M. Iyer', 'T. Das']
-const DOC_TYPES = ['Passport', 'Visa', 'National ID', "Driving Licence"]
+const DOC_TYPES = ['Passport', 'Visa', 'National ID', 'Driving Licence', 'Permit']
 const CHECKPOINTS = ['Attari ICP', 'Petrapole LCS', 'Moreh ICP', 'IGI Airport T3']
 
 const OCR_REASONS = ['MRZ checksum valid', 'Barcode decoded', 'Field format OK']
