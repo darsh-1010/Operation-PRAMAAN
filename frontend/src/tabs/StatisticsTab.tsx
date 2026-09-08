@@ -1,12 +1,27 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import DecisionPanel from '../components/DecisionPanel'
 import KpiCard from '../components/KpiCard'
-import RecentCasesTable from '../components/RecentCasesTable'
+import Modal from '../components/Modal'
+import RecentCasesTable, { type UserRow } from '../components/RecentCasesTable'
 import type { ScreeningCase } from '../types'
 
-export default function StatisticsTab({ cases, onSelect }: { cases: ScreeningCase[]; onSelect: (c: ScreeningCase) => void }) {
+export default function StatisticsTab({ cases }: { cases: ScreeningCase[] }) {
+  const [selected, setSelected] = useState<ScreeningCase | null>(null)
+
   const kpis = useMemo(() => {
     const count = (d: ScreeningCase['decision']) => cases.filter((c) => c.decision === d).length
     return { total: cases.length, accept: count('ACCEPT'), review: count('MANUAL_REVIEW'), reject: count('REJECT') }
+  }, [cases])
+
+  // cases is newest-first, so the first occurrence of a name is that person's latest screening.
+  const userRows = useMemo<UserRow[]>(() => {
+    const seen = new Map<string, UserRow>()
+    for (const c of cases) {
+      const row = seen.get(c.subjectName)
+      if (row) row.screeningCount += 1
+      else seen.set(c.subjectName, { case: c, screeningCount: 1 })
+    }
+    return [...seen.values()]
   }, [cases])
 
   return (
@@ -18,7 +33,13 @@ export default function StatisticsTab({ cases, onSelect }: { cases: ScreeningCas
         <KpiCard label="Rejected" value={String(kpis.reject)} sublabel="hard fail" tone="danger" />
       </section>
 
-      <RecentCasesTable cases={cases} onSelect={onSelect} />
+      <RecentCasesTable rows={userRows} onSelect={setSelected} />
+
+      {selected && (
+        <Modal onClose={() => setSelected(null)}>
+          <DecisionPanel result={selected} />
+        </Modal>
+      )}
     </div>
   )
 }

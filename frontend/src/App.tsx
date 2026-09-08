@@ -29,11 +29,6 @@ export default function App() {
     setLoading(false)
   }
 
-  function handleSelectCase(c: ScreeningCase) {
-    setActive(c)
-    setTab('screening')
-  }
-
   const copy = TAB_COPY[tab]
 
   return (
@@ -43,7 +38,7 @@ export default function App() {
         <Topbar title={copy.title} subtitle={copy.subtitle} theme={theme} onToggleTheme={toggle} onOpenMenu={() => setMenuOpen(true)} />
         <main className="flex-1 px-4 sm:px-6 py-6">
           {tab === 'stats' ? (
-            <StatisticsTab cases={cases} onSelect={handleSelectCase} />
+            <StatisticsTab cases={cases} />
           ) : (
             <NewScreeningTab onRun={handleRun} loading={loading} result={active} />
           )}

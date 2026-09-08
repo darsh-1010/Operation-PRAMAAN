@@ -11,7 +11,7 @@ export default function DecisionPanel({ result }: { result: ScreeningCase | null
   if (!result) {
     return (
       <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-text-dim">
-        Run a screening to see module results and the fused risk decision here.
+        Run a screening to see the per-module, per-check breakdown and the fused risk decision here.
       </div>
     )
   }
@@ -20,7 +20,7 @@ export default function DecisionPanel({ result }: { result: ScreeningCase | null
 
   return (
     <div className="rounded-2xl border border-border bg-surface p-5">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <p className="text-xs text-text-dim">{result.id} · {result.documentType} · {result.checkpoint}</p>
           <p className="text-sm font-medium">{result.subjectName}</p>
@@ -31,7 +31,7 @@ export default function DecisionPanel({ result }: { result: ScreeningCase | null
         </div>
       </div>
 
-      <div className="grid gap-3">
+      <div className="grid gap-3 lg:grid-cols-3">
         {result.modules.map((m) => (
           <ModuleResultCard key={m.id} module={m} />
         ))}

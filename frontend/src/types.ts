@@ -1,11 +1,18 @@
 export type ModuleId = 'ocr' | 'forensics' | 'biometric'
 
+export interface SubCheck {
+  label: string
+  score: number // 0-100
+  passed: boolean
+  reason?: string // present when !passed — why this specific check failed
+}
+
 export interface ModuleResult {
   id: ModuleId
   label: string
-  score: number // 0-100, higher = more trustworthy
+  score: number // 0-100, average of subChecks
   hardFail: boolean
-  reasonCodes: string[]
+  subChecks: SubCheck[]
 }
 
 export type Decision = 'ACCEPT' | 'MANUAL_REVIEW' | 'REJECT'

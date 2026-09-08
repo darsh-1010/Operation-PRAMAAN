@@ -8,7 +8,7 @@ const DOCUMENT_SLOTS = [
   { key: 'visa', label: 'Visa', hint: 'Visa page / sticker', required: true },
   { key: 'nationalId', label: 'National ID', hint: 'Front & back', required: true },
   { key: 'drivingLicence', label: 'Driving Licence', hint: 'Optional', required: false },
-  { key: 'permit', label: 'Permit', hint: 'Border / transit permit, optional', required: false },
+  { key: 'permit', label: 'Permit', hint: 'Optional', required: false },
 ] as const
 
 type SlotKey = (typeof DOCUMENT_SLOTS)[number]['key'] | 'selfie'
@@ -32,13 +32,15 @@ export default function NewScreeningTab({ onRun, loading, result }: Props) {
   const canRun = readyCount === REQUIRED_KEYS.length
 
   return (
-    <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-6 items-start">
+    <div className="space-y-6">
       <div className="rounded-2xl border border-border bg-surface p-5">
-        <p className="text-sm font-medium mb-1">Identity documents</p>
+        <p className="text-sm font-medium mb-1">Identity documents &amp; biometrics</p>
         <p className="text-xs text-text-dim mb-4">
-          Passport, Visa and National ID are required. Driving Licence and Permit are supporting documents.
+          Passport, Visa, National ID and the live selfie/video are required. Driving Licence and Permit are
+          supporting documents.
         </p>
-        <div className="grid grid-cols-2 gap-3">
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {DOCUMENT_SLOTS.map((slot) => (
             <Dropzone
               key={slot.key}
@@ -49,28 +51,21 @@ export default function NewScreeningTab({ onRun, loading, result }: Props) {
               onFile={setFile(slot.key)}
             />
           ))}
+          <Dropzone label="Live selfie / video" hint="JPG/PNG/MP4" accept="image/*,video/*" required onFile={setFile('selfie')} />
         </div>
 
-        <p className="text-sm font-medium mt-5 mb-1">Biometric capture</p>
-        <p className="text-xs text-text-dim mb-3">Live selfie or short video, used for liveness and doc-to-selfie face match.</p>
-        <Dropzone
-          label="Live selfie / video"
-          hint="JPG, PNG or MP4"
-          accept="image/*,video/*"
-          required
-          onFile={setFile('selfie')}
-        />
-
-        <button
-          onClick={onRun}
-          disabled={loading || !canRun}
-          className="mt-5 w-full rounded-xl bg-accent text-accent-fg px-4 py-2.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition"
-        >
-          {loading ? 'Screening…' : 'Run screening'}
-        </button>
-        {!canRun && !loading && (
-          <p className="mt-2 text-center text-xs text-text-dim">{readyCount} of {REQUIRED_KEYS.length} required uploads added</p>
-        )}
+        <div className="mt-5 flex flex-col sm:flex-row items-center gap-3">
+          <button
+            onClick={onRun}
+            disabled={loading || !canRun}
+            className="w-full sm:w-auto sm:px-8 rounded-xl bg-accent text-accent-fg px-4 py-2.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition"
+          >
+            {loading ? 'Screening…' : 'Run screening'}
+          </button>
+          {!canRun && !loading && (
+            <p className="text-xs text-text-dim">{readyCount} of {REQUIRED_KEYS.length} required uploads added</p>
+          )}
+        </div>
       </div>
 
       <DecisionPanel result={result} />

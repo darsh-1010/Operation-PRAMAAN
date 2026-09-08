@@ -11,10 +11,26 @@ export default function ModuleResultCard({ module }: { module: ModuleResult }) {
         )}
       </div>
       <ScoreBar score={module.score} />
-      <ul className="mt-3 flex flex-wrap gap-1.5">
-        {module.reasonCodes.map((code) => (
-          <li key={code} className="text-[11px] text-text-dim bg-surface rounded-md px-2 py-1 border border-border">
-            {code}
+
+      <ul className="mt-3 space-y-2">
+        {module.subChecks.map((check) => (
+          <li key={check.label} className="flex items-start gap-2">
+            {check.passed ? (
+              <svg viewBox="0 0 24 24" className="mt-0.5 h-3.5 w-3.5 shrink-0 stroke-success fill-none" strokeWidth={2.5}>
+                <path d="m5 13 4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="mt-0.5 h-3.5 w-3.5 shrink-0 stroke-danger fill-none" strokeWidth={2.5}>
+                <path d="M6 6l12 12M18 6 6 18" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs">{check.label}</span>
+                <span className="text-[11px] tabular-nums text-text-dim shrink-0">{check.score}</span>
+              </div>
+              {!check.passed && <p className="text-[11px] text-danger mt-0.5">{check.reason}</p>}
+            </div>
           </li>
         ))}
       </ul>
