@@ -88,7 +88,8 @@ kept separate rather than shared). `frontend/` is a separate deployable app.
 Per-module setup instructions live in each module's own README. `ocr-consistency-check`,
 `visual-image-forensics` and `biometric-matching` each run a real FastAPI server today
 (`POST /screen` per [API_CONTRACT.md](API_CONTRACT.md)), currently stubbed pending their real
-detection logic — see each service's README. `risk-scoring-engine` has no code yet.
+detection logic — see each service's README, and [BUILDING_A_MODULE.md](BUILDING_A_MODULE.md)
+if you're the one building that detection logic. `risk-scoring-engine` has no code yet.
 `docker-compose.yml` at the repo root runs everything together for local dev.
 
 ## Security
