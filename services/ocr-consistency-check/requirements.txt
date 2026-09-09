@@ -1,12 +1,17 @@
-fastapi
-uvicorn[standard]
-pydantic
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.0.0
+python-multipart>=0.0.9
 
 # OCR / extraction
-pytesseract
-easyocr
-opencv-python-headless
-pyzbar
+paddleocr>=2.7.0
+pytesseract>=0.3.10
+pypdfium2>=4.0.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
 
-# fuzzy matching for watchlist/blacklist screening
-rapidfuzz
+# Fuzzy matching
+rapidfuzz>=3.0.0
+
+# Database connectivity
+psycopg2-binary>=2.9.9
