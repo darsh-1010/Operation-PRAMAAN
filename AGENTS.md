@@ -21,9 +21,9 @@ installed dependency? Reuse before writing.
   front of you.
 - **No new dependency for what a few lines of stdlib does.** If you do add one, put it in that
   service's `requirements.txt` only — never the repo root.
-- **Cross-service contract, not cross-service imports.** Services talk over the HTTP API shape
-  described in the README (score, `hard_fail`, reason codes) — never import another service's
-  code directly.
+- **Cross-service contract, not cross-service imports.** Services talk over the `POST /screen`
+  HTTP contract in [API_CONTRACT.md](API_CONTRACT.md) (score, `hard_fail`, `reason_codes`) —
+  never import another service's code directly.
 - **Secrets**: never commit real `.env` values — only `.env.example` with placeholders.
 - **Untrusted file uploads**: every image/video comes from the public. See [SECURITY.md](SECURITY.md)
   before touching upload handling in the frontend or writing any backend service's ingest path.

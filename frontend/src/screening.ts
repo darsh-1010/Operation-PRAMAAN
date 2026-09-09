@@ -1,7 +1,11 @@
 import { generateCase } from './mock'
-import { buildScreeningPayload, dispatchToModules } from './lib/submitScreening'
+import { buildScreeningPayload, dispatchToModules, type ModuleDispatchResult } from './lib/submitScreening'
 import type { DocKey } from './lib/documents'
 import type { ScreeningCase } from './types'
+
+function isUnreachable(d: ModuleDispatchResult): d is ModuleDispatchResult & { reachable: false } {
+  return !d.reachable
+}
 
 /**
  * Runs a screening: builds the uuid + documents_present + files payload and dispatches it
@@ -14,9 +18,9 @@ export async function runScreening(files: Partial<Record<DocKey, File>>): Promis
   const payload = buildScreeningPayload(files)
   const dispatch = await dispatchToModules(payload)
 
-  // TODO once the services define a response contract: parse dispatch's real responses
-  // instead of falling back to a mock decision below.
-  const unreachable = dispatch.filter((d) => !d.reachable)
+  // TODO once the services are actually implemented: fuse dispatch's real ModuleResponses
+  // (API_CONTRACT.md) via risk-scoring-engine instead of falling back to a mock decision below.
+  const unreachable = dispatch.filter(isUnreachable)
   if (dispatch.length === 0) {
     console.warn('No module service URLs configured (see .env.example) — using mock result.')
   } else if (unreachable.length) {
