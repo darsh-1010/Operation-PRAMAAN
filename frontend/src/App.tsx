@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import Sidebar, { type Tab } from './components/Sidebar'
 import Topbar from './components/Topbar'
+import type { DocKey } from './lib/documents'
 import { generateRecentCases } from './mock'
 import { runScreening } from './screening'
 import StatisticsTab from './tabs/StatisticsTab'
@@ -21,9 +22,9 @@ export default function App() {
   const [active, setActive] = useState<ScreeningCase | null>(null)
   const [loading, setLoading] = useState(false)
 
-  async function handleRun() {
+  async function handleRun(files: Partial<Record<DocKey, File>>) {
     setLoading(true)
-    const result = await runScreening()
+    const result = await runScreening(files)
     setCases((prev) => [result, ...prev])
     setActive(result)
     setLoading(false)

@@ -1,17 +1,28 @@
 import { generateCase } from './mock'
+import { buildScreeningPayload, dispatchToModules } from './lib/submitScreening'
+import type { DocKey } from './lib/documents'
 import type { ScreeningCase } from './types'
 
 /**
- * Runs a screening for the given inputs and returns the fused result.
- *
- * The 4 backend services (see .env.example: VITE_OCR_SERVICE_URL,
- * VITE_FORENSICS_SERVICE_URL, VITE_BIOMETRIC_SERVICE_URL, VITE_RISK_SERVICE_URL)
- * have no implementation yet, so this simulates the pipeline latency and returns
- * mock data. Swap the body for parallel fetch() calls to the 3 module services
- * + risk-scoring-engine once they exist — the ScreeningCase shape already matches
- * the README's module contract (score, hard_fail, reason codes).
+ * Runs a screening: builds the uuid + documents_present + files payload and dispatches it
+ * to all 3 module services in parallel (see submitScreening.ts). None of them have an
+ * implementation yet, so every dispatch is expected to fail right now — that's logged, and
+ * a mock result stands in so the dashboard stays usable. Swap the fallback for awaiting the
+ * real module responses + risk-scoring-engine once those services exist.
  */
-export async function runScreening(): Promise<ScreeningCase> {
-  await new Promise((resolve) => setTimeout(resolve, 1400))
-  return generateCase()
+export async function runScreening(files: Partial<Record<DocKey, File>>): Promise<ScreeningCase> {
+  const payload = buildScreeningPayload(files)
+  const dispatch = await dispatchToModules(payload)
+
+  // TODO once the services define a response contract: parse dispatch's real responses
+  // instead of falling back to a mock decision below.
+  const unreachable = dispatch.filter((d) => !d.reachable)
+  if (dispatch.length === 0) {
+    console.warn('No module service URLs configured (see .env.example) — using mock result.')
+  } else if (unreachable.length) {
+    console.warn(`Module services unreachable, using mock result: ${unreachable.map((d) => `${d.name} (${d.error})`).join(', ')}`)
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 1000)) // simulate pipeline latency for the demo
+  return generateCase(payload.uuid)
 }

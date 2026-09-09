@@ -1,30 +1,19 @@
 import { useState } from 'react'
 import DecisionPanel from '../components/DecisionPanel'
 import Dropzone from '../components/Dropzone'
+import { DOCUMENT_SLOTS, REQUIRED_KEYS, type DocKey } from '../lib/documents'
 import type { ScreeningCase } from '../types'
 
-const DOCUMENT_SLOTS = [
-  { key: 'passport', label: 'Passport', hint: 'Bio-data page', required: true },
-  { key: 'visa', label: 'Visa', hint: 'Visa page / sticker', required: true },
-  { key: 'nationalId', label: 'National ID', hint: 'Front & back', required: true },
-  { key: 'drivingLicence', label: 'Driving Licence', hint: 'Optional', required: false },
-  { key: 'permit', label: 'Permit', hint: 'Optional', required: false },
-] as const
-
-type SlotKey = (typeof DOCUMENT_SLOTS)[number]['key'] | 'selfie'
-
-const REQUIRED_KEYS: SlotKey[] = [...DOCUMENT_SLOTS.filter((s) => s.required).map((s) => s.key), 'selfie']
-
 interface Props {
-  onRun: () => void
+  onRun: (files: Partial<Record<DocKey, File>>) => void
   loading: boolean
   result: ScreeningCase | null
 }
 
 export default function NewScreeningTab({ onRun, loading, result }: Props) {
-  const [files, setFiles] = useState<Partial<Record<SlotKey, File>>>({})
+  const [files, setFiles] = useState<Partial<Record<DocKey, File>>>({})
 
-  function setFile(key: SlotKey) {
+  function setFile(key: DocKey) {
     return (file: File | null) => setFiles((prev) => ({ ...prev, [key]: file ?? undefined }))
   }
 
@@ -56,7 +45,7 @@ export default function NewScreeningTab({ onRun, loading, result }: Props) {
 
         <div className="mt-5 flex flex-col sm:flex-row items-center gap-3">
           <button
-            onClick={onRun}
+            onClick={() => onRun(files)}
             disabled={loading || !canRun}
             className="w-full sm:w-auto sm:px-8 rounded-xl bg-accent text-accent-fg px-4 py-2.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition"
           >

@@ -64,7 +64,7 @@ function decide(modules: ModuleResult[]): { decision: Decision; riskScore: numbe
   return { decision: 'ACCEPT', riskScore }
 }
 
-export function generateCase(): ScreeningCase {
+export function generateCase(id?: string): ScreeningCase {
   const modules: ModuleResult[] = [
     buildModule('ocr', 'OCR, Extraction & Watchlist', OCR_CHECKS),
     buildModule('forensics', 'Visual / Image Forensics', FORENSICS_CHECKS),
@@ -72,7 +72,7 @@ export function generateCase(): ScreeningCase {
   ]
   const { decision, riskScore } = decide(modules)
   return {
-    id: `PRM-${Math.floor(100000 + Math.random() * 900000)}`,
+    id: id ?? `PRM-${Math.floor(100000 + Math.random() * 900000)}`,
     subjectName: pick(NAMES),
     documentType: pick(DOC_TYPES),
     checkpoint: pick(CHECKPOINTS),
