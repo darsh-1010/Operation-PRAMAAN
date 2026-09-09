@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 pydantic
+python-multipart
 
 # liveness + face embedding / matching
 opencv-python-headless
