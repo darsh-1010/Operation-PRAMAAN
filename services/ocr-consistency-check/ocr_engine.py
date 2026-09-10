@@ -61,14 +61,12 @@ class OCREngine:
             os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
             from paddleocr import PaddleOCR
             cpu_threads = int(os.environ.get("CPU_THREADS", os.cpu_count() or 4))
-            enable_mkldnn = os.environ.get("ENABLE_MKLDNN", "true").lower() == "true"
             enable_mkldnn = os.environ.get("ENABLE_MKLDNN", "false").lower() == "true"
             use_angle_cls = os.environ.get("USE_ANGLE_CLS", "true").lower() == "true"
             lang = os.environ.get("OCR_LANG", "en")
 
             logger.info("Initializing PaddleOCR with lang=%s...", lang)
             # PaddleOCR 3.x uses use_textline_orientation, 2.x uses use_angle_cls
-            init_kwargs = {"lang": lang}
             init_kwargs = {
                 "lang": lang,
                 "enable_mkldnn": enable_mkldnn,
@@ -103,7 +101,6 @@ class OCREngine:
         """Execute OCR extraction using PaddleOCR with format compatibility."""
         try:
             raw_res = self._paddle_ocr.ocr(image)
-        except TypeError:
         except (TypeError, AttributeError):
             raw_res = list(self._paddle_ocr.predict(image))
 
@@ -206,27 +203,6 @@ class OCREngine:
                     conf_val = 0.9
                     polygon = []
 
-                if polygon and len(polygon) >= 4:
-                    xs = [pt[0] for pt in polygon]
-                    ys = [pt[1] for pt in polygon]
-                    min_x, max_x = min(xs), max(xs)
-                    min_y, max_y = min(ys), max(ys)
-                    bbox = {
-                        "x": round(float(min_x), 2),
-                        "y": round(float(min_y), 2),
-                        "w": round(float(max_x - min_x), 2),
-                        "h": round(float(max_y - min_y), 2),
-                    }
-                else:
-                    bbox = {"x": 0.0, "y": 0.0, "w": float(image.shape[1]), "h": 20.0}
-
-                confidences.append(conf_val)
-                blocks.append(TextBlock(
-                    text=text_clean,
-                    confidence=conf_val,
-                    bbox=bbox,
-                    polygon=[[round(float(p[0]), 2), round(float(p[1]), 2)] for p in polygon] if polygon else [],
-                ))
                     if isinstance(item, (list, tuple)) and len(item) == 2:
                         poly_candidate, text_data = item
                         if isinstance(poly_candidate, (list, tuple)):
