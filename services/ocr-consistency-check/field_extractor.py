@@ -5,6 +5,7 @@ from OCR text blocks using regex patterns, label anchoring, and MRZ cross-checki
 """
 
 from __future__ import annotations
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,8 @@ from typing import Any, Dict, List, Optional
 from mrz_verifier import MRZCheckResult, extract_and_verify_mrz
 from normalizer import normalize_date, normalize_gender, normalize_id_number, normalize_name
 from ocr_engine import OCRResult, TextBlock
+
+logger = logging.getLogger("field_extractor")
 
 
 @dataclass
@@ -41,16 +44,21 @@ class ParsedDocumentData:
 
 
 def detect_document_type(full_text: str) -> str:
-    """Infer document type from text tokens."""
+    """Infer document type from text tokens.
+
+    Checked in order of specificity: a "PASSPORT NO" field is common on visas,
+    driving licences, etc., so the generic "PASSPORT" substring is checked
+    last, only once the more specific document-type keywords have missed.
+    """
     upper = full_text.upper()
-    if "PASSPORT" in upper or "REPUBLIC OF INDIA" in upper and "PASSPORT" in upper:
-        return "PASSPORT"
+    if "VISA" in upper:
+        return "VISA"
     if "DRIVING" in upper or "LICENCE" in upper or "LICENSE" in upper:
         return "DRIVING_LICENSE"
     if "AADHAAR" in upper or "UNIQUE IDENTIFICATION" in upper or "PAN CARD" in upper:
         return "NATIONAL_ID"
-    if "VISA" in upper:
-        return "VISA"
+    if "PASSPORT" in upper:
+        return "PASSPORT"
     return "NATIONAL_ID"
 
 
@@ -161,6 +169,13 @@ def extract_document_fields(ocr_result: OCRResult) -> ParsedDocumentData:
         fields_list.append(ExtractedField("document_number", norm_doc_num, "VIZ", 0.92))
     if norm_sex:
         fields_list.append(ExtractedField("gender", norm_sex, "VIZ", 0.90))
+
+    if inconsistencies:
+        logger.warning("VIZ/MRZ inconsistencies detected: %s", "; ".join(inconsistencies))
+    logger.info(
+        "Extracted fields for doc_type=%s: document_number=%s, name=%s, dob=%s (mrz_present=%s).",
+        doc_type, final_doc_num, final_name, final_dob, mrz is not None,
+    )
 
     return ParsedDocumentData(
         doc_type=doc_type,

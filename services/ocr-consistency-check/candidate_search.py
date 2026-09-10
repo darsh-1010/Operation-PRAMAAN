@@ -86,6 +86,7 @@ class CandidateSearchEngine:
                 issuing_country=str(r.get("issuing_country", "IND")),
                 status=str(r.get("status", "ACTIVE")),
             ))
+        logger.info("Candidate search for doc_type=%s, id_number=%s: %d result(s).", doc_type, id_number, len(candidates))
         return candidates
 
     def screen_watchlist(self, document_number: Optional[str], full_name: Optional[str], dob: Optional[str]) -> List[WatchlistHitResult]:
@@ -132,5 +133,9 @@ class CandidateSearchEngine:
                     is_hard_fail=True,
                 ))
 
+        if hits:
+            logger.warning("Watchlist screening: %d hit(s) for doc_number=%s.", len(hits), document_number)
+        else:
+            logger.info("Watchlist screening: no hits for doc_number=%s.", document_number)
         return hits
 

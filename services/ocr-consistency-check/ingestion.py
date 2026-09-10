@@ -8,11 +8,14 @@ Calculates SHA-256 hash for document audit logging and deduplication.
 from __future__ import annotations
 import hashlib
 import io
+import logging
 from dataclasses import dataclass
 from typing import List, Tuple
 
 import numpy as np
 from PIL import Image
+
+logger = logging.getLogger("ingestion")
 
 SUPPORTED_MIME_TYPES = {
     "image/jpeg": "JPEG",
@@ -110,6 +113,11 @@ def ingest_file(file_bytes: bytes, filename: str = "") -> IngestedDocument:
 
     first_image = images[0]
     height, width = first_image.shape[0], first_image.shape[1]
+
+    logger.info(
+        "Ingested '%s' (%s, sha256=%s, pages=%d, %dx%d).",
+        filename or "<unnamed>", mime_type, file_hash[:12], len(images), width, height,
+    )
 
     return IngestedDocument(
         images=images,

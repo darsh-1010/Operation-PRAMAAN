@@ -40,7 +40,7 @@ class DatabaseManager:
         port = os.environ.get("POSTGRES_PORT", "5432")
         db = os.environ.get("POSTGRES_DB", "postgres")
         user = os.environ.get("POSTGRES_USER", "postgres")
-        pwd = os.environ.get("POSTGRES_PASSWORD", "Aarya")
+        pwd = os.environ.get("POSTGRES_PASSWORD", "postgres")
 
         try:
             import psycopg2

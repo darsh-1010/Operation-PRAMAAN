@@ -101,8 +101,33 @@ class OCREngine:
         confidences: List[float] = []
 
         if raw_res:
+            # PaddleOCR 3.x / PaddleX pipeline: raw_res[0] is a single dict-like
+            # OCRResult per page carrying parallel rec_texts/rec_scores/rec_polys
+            # lists, not one item per text line. Expand it into per-line items
+            # so the loop below can handle it the same as the older formats.
+            if (
+                isinstance(raw_res, list) and len(raw_res) > 0
+                and hasattr(raw_res[0], "get") and raw_res[0].get("rec_texts") is not None
+            ):
+                page = raw_res[0]
+                rec_texts = page.get("rec_texts") or []
+                rec_scores = page.get("rec_scores") or []
+                rec_polys = page.get("rec_polys")
+                if rec_polys is None:
+                    rec_polys = page.get("rec_boxes") or []
+                items = [
+                    {
+                        "rec_text": rec_texts[i],
+                        "rec_score": rec_scores[i] if i < len(rec_scores) else 0.9,
+                        "rec_poly": rec_polys[i] if i < len(rec_polys) else None,
+                    }
+                    for i in range(len(rec_texts))
+                ]
             # Handle list of items or list of lists
-            items = raw_res[0] if (isinstance(raw_res, list) and len(raw_res) > 0 and isinstance(raw_res[0], list)) else raw_res
+            elif isinstance(raw_res, list) and len(raw_res) > 0 and isinstance(raw_res[0], list):
+                items = raw_res[0]
+            else:
+                items = raw_res
 
             for item in items:
                 text_clean = ""
@@ -118,11 +143,16 @@ class OCREngine:
                         conf_val = round(float(text_data[1]), 4)
                     else:
                         text_clean = str(text_data).strip()
+                elif isinstance(item, dict) and "rec_text" in item:
+                    text_clean = str(item["rec_text"]).strip()
+                    conf_val = round(float(item["rec_score"]), 4)
+                    if item.get("rec_poly") is not None:
+                        polygon = np.asarray(item["rec_poly"]).tolist()
                 elif hasattr(item, "rec_text") and hasattr(item, "rec_score"):
                     text_clean = str(item.rec_text).strip()
                     conf_val = round(float(item.rec_score), 4)
                     if hasattr(item, "dt_polys"):
-                        polygon = item.dt_polys
+                        polygon = np.asarray(item.dt_polys).tolist()
 
                 if not text_clean:
                     continue

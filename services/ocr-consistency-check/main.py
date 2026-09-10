@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from candidate_search import CandidateSearchEngine
+from cross_document import cross_check_documents
 from db import DatabaseManager
 from decision_matrix import DecisionOutcome, evaluate_decision_matrix
 from field_extractor import ParsedDocumentData, extract_document_fields
@@ -239,6 +240,46 @@ async def screen_document(
             for f in parsed.fields
         ],
     )
+
+
+@app.post("/api/v1/cross-verify", tags=["Cross-Document"])
+async def cross_verify_documents(files: List[UploadFile] = File(...)) -> Dict[str, Any]:
+    """Cross-check name/DOB/gender consistency across 2+ documents for the same person
+    (e.g. passport + driving licence + visa). Independent of /screen; does not touch DB."""
+    if len(files) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload at least 2 documents to cross-verify.")
+
+    ocr_engine = OCREngine.get_instance()
+    parsed_docs: List[ParsedDocumentData] = []
+    for f in files:
+        try:
+            content = await f.read()
+            ingested = ingest_file(content, f.filename or "")
+            ocr_res = ocr_engine.extract_text(ingested.images[0])
+            parsed_docs.append(extract_document_fields(ocr_res))
+        except Exception as err:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process '{f.filename}': {err}")
+
+    outcome = cross_check_documents(parsed_docs)
+    return {
+        "consistent": outcome.consistent,
+        "documents": [
+            {
+                "filename": f.filename,
+                "doc_type": d.doc_type,
+                "document_number": d.document_number,
+                "claimed_name": d.claimed_name,
+                "claimed_dob": d.claimed_dob,
+                "claimed_gender": d.claimed_gender,
+                "mrz_valid": d.mrz_result.valid_format and not d.mrz_result.has_checksum_failure if d.mrz_result else None,
+            }
+            for f, d in zip(files, parsed_docs)
+        ],
+        "field_results": [
+            {"field": r.field_key, "consistent": r.consistent, "values": r.values, "detail": r.detail}
+            for r in outcome.field_results
+        ],
+    }
 
 
 @app.post("/api/v1/verify-text", tags=["Verification"])

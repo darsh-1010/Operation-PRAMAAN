@@ -13,5 +13,8 @@ Pillow>=10.0.0
 # Fuzzy matching
 rapidfuzz>=3.0.0
 
+# Nepal Bikram Sambat calendar conversion (Nepali driving licences print DOB in BS, not AD)
+nepali-datetime>=1.0.8
+
 # Database connectivity
 psycopg2-binary>=2.9.9

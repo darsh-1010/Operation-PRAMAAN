@@ -11,12 +11,19 @@ and classifies the encounter as: VERIFIED, NEEDS REVIEW, or NOT VERIFIED.
 """
 
 from __future__ import annotations
+import datetime
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from candidate_search import WatchlistHitResult
 from field_extractor import ParsedDocumentData
 from matcher import MatchOutcome
+
+logger = logging.getLogger("decision_matrix")
+
+MIN_PLAUSIBLE_AGE_YEARS = 0
+MAX_PLAUSIBLE_AGE_YEARS = 120
 
 
 @dataclass
@@ -52,6 +59,62 @@ class DecisionOutcome:
     sub_scores: Dict[str, float] = field(default_factory=dict)
 
 
+def _validate_field_formats(extracted: ParsedDocumentData) -> List[ValidationCheckRecord]:
+    """Format-level checks independent of any registry lookup: is the name
+    text-only, is the DOB a real plausible date, is a document number present.
+    Informational only — does not affect hard_fail or the weighted score.
+    """
+    checks: List[ValidationCheckRecord] = []
+    today = datetime.date.today()
+
+    name = extracted.claimed_name
+    name_ok = bool(name) and all(c.isalpha() or c.isspace() for c in name)
+    checks.append(ValidationCheckRecord(
+        check_type="FIELD_FORMAT", field_key="name", status="PASS" if name_ok else "FAIL",
+        is_hard_fail=False, expected_value="alphabetic text", observed_value=name,
+        detail="Name is present and text-only." if name_ok else "Name is missing or contains non-alphabetic characters.",
+    ))
+
+    dob_ok = False
+    dob_detail = "Date of birth is missing or unparseable."
+    if extracted.claimed_dob:
+        try:
+            dob = datetime.date.fromisoformat(extracted.claimed_dob)
+            age_years = (today - dob).days / 365.25
+            dob_ok = MIN_PLAUSIBLE_AGE_YEARS <= age_years <= MAX_PLAUSIBLE_AGE_YEARS
+            dob_detail = "Date of birth is a plausible past date." if dob_ok else f"Date of birth implies an implausible age (~{age_years:.0f} years)."
+        except ValueError:
+            pass
+    checks.append(ValidationCheckRecord(
+        check_type="FIELD_FORMAT", field_key="dob", status="PASS" if dob_ok else "FAIL",
+        is_hard_fail=False, expected_value="valid past date", observed_value=extracted.claimed_dob,
+        detail=dob_detail,
+    ))
+
+    doc_num_ok = bool(extracted.document_number) and extracted.document_number.isalnum()
+    checks.append(ValidationCheckRecord(
+        check_type="FIELD_FORMAT", field_key="document_number", status="PASS" if doc_num_ok else "FAIL",
+        is_hard_fail=False, expected_value="alphanumeric", observed_value=extracted.document_number,
+        detail="Document number is present and alphanumeric." if doc_num_ok else "Document number is missing or contains unexpected characters.",
+    ))
+
+    if extracted.claimed_expiry:
+        try:
+            exp = datetime.date.fromisoformat(extracted.claimed_expiry)
+            exp_ok = True
+            exp_detail = "Expiry date is a valid calendar date."
+        except ValueError:
+            exp_ok = False
+            exp_detail = "Expiry date is unparseable."
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT", field_key="expiry", status="PASS" if exp_ok else "FAIL",
+            is_hard_fail=False, expected_value="valid date", observed_value=extracted.claimed_expiry,
+            detail=exp_detail,
+        ))
+
+    return checks
+
+
 def evaluate_decision_matrix(
     extracted: ParsedDocumentData,
     match: MatchOutcome,
@@ -60,13 +123,14 @@ def evaluate_decision_matrix(
     """Calculate weighted Score A and determine verification status and reason codes."""
     hard_fail = False
     reasons: List[ReasonCode] = []
-    checks: List[ValidationCheckRecord] = []
+    checks: List[ValidationCheckRecord] = _validate_field_formats(extracted)
 
     # -------------------------------------------------------------
     # 1. Watchlist Screening Checks
     # -------------------------------------------------------------
     if watchlist_hits:
         hard_fail = True
+        logger.warning("Watchlist hit(s): %s", [h.kind for h in watchlist_hits])
         for hit in watchlist_hits:
             reasons.append(ReasonCode(
                 code=f"WATCHLIST_HIT_{hit.kind}",
@@ -250,6 +314,11 @@ def evaluate_decision_matrix(
             status = "NOT VERIFIED"
 
     score_100 = round(canonical_score * 100.0, 2)
+
+    logger.info(
+        "Decision: status=%s, score=%.2f, hard_fail=%s, reason_codes=%s.",
+        status, score_100, hard_fail, [r.code for r in reasons],
+    )
 
     return DecisionOutcome(
         status=status,

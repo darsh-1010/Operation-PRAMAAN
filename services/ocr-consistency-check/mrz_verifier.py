@@ -8,9 +8,12 @@ integrity to detect document tampering or fraudulent alterations.
 
 from __future__ import annotations
 import datetime
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("mrz_verifier")
 
 ICAO_WEIGHTS = [7, 3, 1]
 
@@ -152,6 +155,11 @@ def parse_td3_mrz(lines: List[str]) -> MRZCheckResult:
     if not p_comp:
         failures.append(f"Composite MRZ checksum mismatch: calc {res_comp['calculated']} vs {comp_cd}")
 
+    if failures:
+        logger.warning("TD3 MRZ checksum failure(s): %s", "; ".join(failures))
+    else:
+        logger.info("TD3 MRZ verified: all checksums passed.")
+
     return MRZCheckResult(
         valid_format=True,
         format_type="TD3",
@@ -219,6 +227,11 @@ def parse_td1_mrz(lines: List[str]) -> MRZCheckResult:
     if not p_comp:
         failures.append(f"Composite MRZ checksum mismatch in TD1.")
 
+    if failures:
+        logger.warning("TD1 MRZ checksum failure(s): %s", "; ".join(failures))
+    else:
+        logger.info("TD1 MRZ verified: all checksums passed.")
+
     return MRZCheckResult(
         valid_format=True,
         format_type="TD1",
@@ -255,5 +268,6 @@ def extract_and_verify_mrz(text_lines: List[str]) -> Optional[MRZCheckResult]:
         if len(l1) == 30 and len(l2) == 30 and len(l3) == 30 and (l1.startswith("I") or l1.startswith("A")):
             return parse_td1_mrz([l1, l2, l3])
 
+    logger.info("No MRZ block detected in OCR text (%d candidate lines).", len(candidate_lines))
     return None
 

@@ -7,11 +7,14 @@ against ground-truth registry candidates and cross-checks VIZ vs MRZ.
 
 from __future__ import annotations
 import datetime
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from candidate_search import CandidateRecord
 from field_extractor import ParsedDocumentData
+
+logger = logging.getLogger("matcher")
 
 try:
     from rapidfuzz import fuzz
@@ -66,6 +69,7 @@ class MatchOutcome:
 def match_against_candidate(extracted: ParsedDocumentData, candidate: Optional[CandidateRecord]) -> MatchOutcome:
     """Evaluate extracted credentials against ground-truth candidate."""
     if candidate is None:
+        logger.info("No registry candidate to match against.")
         return MatchOutcome(
             has_candidate=False,
             candidate=None,
@@ -121,6 +125,13 @@ def match_against_candidate(extracted: ParsedDocumentData, candidate: Optional[C
             pass
 
     validity_score = 1.0 if (is_active and not is_expired) else (0.5 if (is_active and is_expired) else 0.0)
+
+    logger.info(
+        "Match against candidate %s: id_matched=%s, dob_matched=%s, name_score=%.2f, active=%s, expired=%s.",
+        candidate.record_id, id_matched, dob_matched, name_score, is_active, is_expired,
+    )
+    if differences:
+        logger.warning("Match differences: %s", "; ".join(differences))
 
     return MatchOutcome(
         has_candidate=True,

@@ -104,6 +104,32 @@ def normalize_id_number(id_str: Optional[str]) -> Optional[str]:
     return cleaned if cleaned else None
 
 
+def normalize_bikram_sambat_date(bs_date_str: Optional[str]) -> Optional[str]:
+    """Convert a Nepali Bikram Sambat (B.S.) date string to ISO-8601 Gregorian.
+
+    Nepali driving licences and citizenship documents print dates in the B.S.
+    calendar (~56-57 years ahead of A.D.), not Gregorian — even when the
+    digits and label are in English/Latin script, treating them as a normal
+    Gregorian date via normalize_date() gives a wrong year. Call this
+    explicitly once a document has been identified as Nepali; it is not
+    wired into the default extraction flow.
+    """
+    if not bs_date_str:
+        return None
+
+    iso = normalize_date(bs_date_str)
+    if not iso:
+        return None
+
+    try:
+        import nepali_datetime
+        y, m, d = (int(x) for x in iso.split("-"))
+        bs_date = nepali_datetime.date(y, m, d)
+        return bs_date.to_datetime_date().isoformat()
+    except (ImportError, ValueError):
+        return None
+
+
 def normalize_gender(gender_str: Optional[str]) -> Optional[str]:
     """Normalize gender code to 'M', 'F', or 'X'."""
     if not gender_str:
