@@ -46,6 +46,7 @@ class DocToSelfieThresholds:
 class CrossDocumentThresholds:
     accept_threshold: float = 0.70
     review_threshold: float = 0.55
+    hard_fail_threshold: float = 0.30
 
 
 @dataclass

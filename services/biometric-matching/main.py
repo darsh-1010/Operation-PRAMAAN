@@ -187,6 +187,7 @@ async def screen(
 
     # --- Doc-to-selfie matching ---
     from app.ml import similarity as sim_module
+    from itertools import combinations
 
     match_scores: list[float] = []
     if selfie_result and selfie_result["detected"] and selfie_result["embedding"]:
@@ -221,25 +222,56 @@ async def screen(
                     logger.exception("Similarity comparison failed for selfie vs %s", key)
                     reason_codes.append(f"{key}: similarity_computation_error")
 
-    # --- Scoring ---
-    # Compute a preliminary biometric score (0..1 internally, returned as 0-100).
-    # This is a simplified version — full fusion (liveness + cross-document) comes in
-    # later feature branches.
-    if match_scores:
-        doc_match_score = sum(match_scores) / len(match_scores)
-    else:
-        # No matching was possible (no selfie, no doc faces, etc.)
-        doc_match_score = 0.5  # neutral — cannot assess
+    # --- Cross-document consistency ---
+    cross_doc_scores: list[float] = []
+    valid_docs = {k: v for k, v in doc_results.items() if v["detected"] and v["embedding"]}
+    
+    for doc1, doc2 in combinations(valid_docs.keys(), 2):
+        try:
+            score = sim_module.compare(
+                valid_docs[doc1]["embedding"],
+                valid_docs[doc2]["embedding"],
+                metric=_config.face_model.similarity_metric
+            )
+            cross_doc_scores.append(score)
+            
+            if score < _config.cross_document.hard_fail_threshold:
+                q1, q2 = valid_docs[doc1]["quality"], valid_docs[doc2]["quality"]
+                if min(q1, q2) >= _config.quality.min_reliable_quality:
+                    reason_codes.append(
+                        f"{doc1}_vs_{doc2}: {ReasonCode.CROSS_DOCUMENT_FACE_MISMATCH.value} "
+                        f"(similarity={score:.3f})"
+                    )
+                    hard_fail = True
+                else:
+                    reason_codes.append(
+                        f"{doc1}_vs_{doc2}: {ReasonCode.CROSS_DOCUMENT_LOW_QUALITY.value}"
+                    )
+            elif score < _config.cross_document.review_threshold:
+                reason_codes.append(
+                    f"{doc1}_vs_{doc2}: cross_document_review_required (similarity={score:.3f})"
+                )
+        except Exception:
+            logger.exception("Cross-doc comparison failed for %s vs %s", doc1, doc2)
+            reason_codes.append(f"{doc1}_vs_{doc2}: similarity_computation_error")
 
-    # Without liveness and cross-document, use only doc_match as a preliminary score
-    # Clamp to [0, 1] since cosine similarity can theoretically be negative
-    internal_score = max(0.0, min(1.0, doc_match_score))
+    # --- Scoring ---
+    # Combine doc-to-selfie and cross-document scores.
+    all_scores = match_scores + cross_doc_scores
+    if all_scores:
+        overall_score = sum(all_scores) / len(all_scores)
+    else:
+        # No matching was possible
+        overall_score = 0.5  # neutral — cannot assess
+
+    # Clamp to [0, 1]
+    internal_score = max(0.0, min(1.0, overall_score))
 
     # API contract: score is 0-100 integer
     api_score = int(round(internal_score * 100))
 
     if not reason_codes:
-        if match_scores:
+        if all_scores:
             reason_codes.append("face_matching_completed")
         else:
             reason_codes.append("no_face_matching_performed")

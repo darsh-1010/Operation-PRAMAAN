@@ -30,8 +30,9 @@ doc_to_selfie:
   hard_fail_threshold: 0.30    # below this → HARD FAIL (high quality only)
 
 cross_document:
-  accept_threshold: 0.70
-  review_threshold: 0.55
+  accept_threshold: 0.60
+  review_threshold: 0.45
+  hard_fail_threshold: 0.30
 
 fusion:
   liveness_weight: 0.35
