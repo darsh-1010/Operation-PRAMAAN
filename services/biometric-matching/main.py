@@ -79,7 +79,6 @@ def _run_face_pipeline(
     Returns a dict with detection results and any reason codes.
     Does NOT raise on no-face — that's a scoring/reason-code issue, not an HTTP error.
     """
-    from app.ml.face_encoder import DlibFaceEncoder
     from app.ml.similarity import compare as compare_embeddings  # noqa: F811
 
     rgb = image_bytes_to_rgb(image_data)
@@ -98,7 +97,8 @@ def _run_face_pipeline(
         reason = ReasonCode.MULTIPLE_FACES_DETECTED.value
 
     # Generate embedding
-    encoder = DlibFaceEncoder(_config.face_model)
+    from app.ml.face_encoder import ArcFaceEncoder
+    encoder = ArcFaceEncoder(_config.face_model)
     embedding = None
     if result.aligned_face is not None:
         embedding = encoder.generate_embedding(result.aligned_face)

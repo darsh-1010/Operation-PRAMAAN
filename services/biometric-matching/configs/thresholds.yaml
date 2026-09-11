@@ -13,21 +13,21 @@
 # so decisions remain reproducible when these values are updated.
 
 face_model:
-  name: "dlib-resnet-v1"
-  version: "0.1.0-placeholder"
-  embedding_dimension: 128
+  name: "ArcFace"
+  version: "deepface-1.0"
+  embedding_dimension: 512
   similarity_metric: "cosine"
   # Preprocessing applied before embedding generation
-  preprocessing_version: "align-dlib-v1"
+  preprocessing_version: "retinaface-v1"
 
 liveness:
   review_threshold: 0.80       # below this → REVIEW
   hard_fail_threshold: 0.20    # below this → HARD FAIL
 
 doc_to_selfie:
-  accept_threshold: 0.75       # above this → PASS
-  review_threshold: 0.60       # above this → REVIEW, below → FAIL
-  hard_fail_threshold: 0.40    # below this → HARD FAIL (high quality only)
+  accept_threshold: 0.60       # above this → PASS
+  review_threshold: 0.45       # above this → REVIEW, below → FAIL
+  hard_fail_threshold: 0.30    # below this → HARD FAIL (high quality only)
 
 cross_document:
   accept_threshold: 0.70

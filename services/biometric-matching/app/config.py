@@ -22,11 +22,11 @@ _DEFAULT_PATH = _CONFIG_DIR / "thresholds.yaml"
 
 @dataclass
 class FaceModelConfig:
-    name: str = "dlib-resnet-v1"
-    version: str = "0.1.0-placeholder"
-    embedding_dimension: int = 128
+    name: str = "ArcFace"
+    version: str = "deepface-1.0"
+    embedding_dimension: int = 512
     similarity_metric: str = "cosine"
-    preprocessing_version: str = "align-dlib-v1"
+    preprocessing_version: str = "retinaface-v1"
 
 
 @dataclass
@@ -37,9 +37,9 @@ class LivenessThresholds:
 
 @dataclass
 class DocToSelfieThresholds:
-    accept_threshold: float = 0.75
-    review_threshold: float = 0.60
-    hard_fail_threshold: float = 0.40
+    accept_threshold: float = 0.60
+    review_threshold: float = 0.45
+    hard_fail_threshold: float = 0.30
 
 
 @dataclass
