@@ -27,6 +27,7 @@ def detect_and_align(
     image_rgb: np.ndarray,
     *,
     model: str = "retinaface",
+    check_liveness: bool = False,
 ) -> FaceDetectionResult:
     """Detect, align, and quality-check the primary face in *image_rgb*.
 
@@ -36,6 +37,8 @@ def detect_and_align(
         Input image as H×W×3 RGB uint8.
     model : str
         ``"retinaface"`` or other deepface backends.
+    check_liveness : bool
+        If True, runs anti-spoofing model and populates liveness_score.
 
     Returns
     -------
@@ -60,7 +63,8 @@ def detect_and_align(
             img_path=image_bgr,
             detector_backend=model,
             align=True,
-            enforce_detection=True
+            enforce_detection=True,
+            anti_spoofing=check_liveness
         )
     except ValueError:
         # DeepFace raises ValueError if enforce_detection=True and no face is found
@@ -113,12 +117,17 @@ def detect_and_align(
         face_size_ratio=face_size_ratio,
     )
 
+    liveness_score = float(best_face["antispoof_score"]) if "antispoof_score" in best_face else None
+    is_real = bool(best_face["is_real"]) if "is_real" in best_face else None
+
     return FaceDetectionResult(
         found=True,
         face_count=face_count,
         box=box,
         quality=quality,
         aligned_face=aligned,
+        liveness_score=liveness_score,
+        is_real=is_real
     )
 
 

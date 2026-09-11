@@ -73,6 +73,7 @@ def validate_selfie(data: bytes) -> None:
 def _run_face_pipeline(
     image_data: bytes,
     label: str,
+    check_liveness: bool = False,
 ) -> dict:
     """Run face detection + alignment + quality on raw image bytes.
 
@@ -86,7 +87,7 @@ def _run_face_pipeline(
         return {"detected": False, "reason": ReasonCode.FACE_NOT_DETECTED.value,
                 "label": label, "quality": 0.0, "embedding": None}
 
-    result = detect_and_align(rgb)
+    result = detect_and_align(rgb, check_liveness=check_liveness)
 
     if not result.found:
         return {"detected": False, "reason": ReasonCode.FACE_NOT_DETECTED.value,
@@ -116,6 +117,8 @@ def _run_face_pipeline(
         "face_count": result.face_count,
         "embedding": embedding,
         "reason": reason,
+        "liveness_score": result.liveness_score,
+        "is_real": result.is_real,
     }
 
 
@@ -163,11 +166,25 @@ async def screen(
     selfie_result = None
     if selfie_data is not None:
         try:
-            selfie_result = _run_face_pipeline(selfie_data, "selfie")
+            selfie_result = _run_face_pipeline(selfie_data, "selfie", check_liveness=True)
             if not selfie_result["detected"]:
                 reason_codes.append(f"selfie: {ReasonCode.FACE_NOT_DETECTED.value}")
             elif selfie_result.get("reason"):
                 reason_codes.append(f"selfie: {selfie_result['reason']}")
+                
+            # Liveness Evaluation
+            if selfie_result.get("liveness_score") is not None:
+                l_score = selfie_result["liveness_score"]
+                # Deepface's antispoof_score isn't always strictly 0-1, but let's 
+                # treat higher as more likely to be real based on typical conventions,
+                # or evaluate based on our thresholds.
+                # If the score indicates spoofing based on our threshold:
+                if l_score < _config.liveness.hard_fail_threshold:
+                    reason_codes.append(f"selfie: {ReasonCode.LIVENESS_SPOOF_DETECTED.value} (score={l_score:.2f})")
+                    hard_fail = True
+                elif l_score < _config.liveness.review_threshold:
+                    reason_codes.append(f"selfie: {ReasonCode.LIVENESS_REVIEW_REQUIRED.value} (score={l_score:.2f})")
+
         except Exception:
             logger.exception("Face pipeline failed for selfie")
             reason_codes.append("selfie: face_pipeline_error")

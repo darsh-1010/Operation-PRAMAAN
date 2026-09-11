@@ -76,6 +76,9 @@ class FaceDetectionResult:
     quality: QualityMetrics = field(default_factory=QualityMetrics)
     # Aligned face image as numpy array (H×W×3, RGB uint8). None when no face found.
     aligned_face: object = None  # typed as object to avoid numpy import at module level
+    # Liveness (anti-spoofing) metrics. Only populated if check_liveness=True.
+    liveness_score: Optional[float] = None
+    is_real: Optional[bool] = None
 
 
 @dataclass(frozen=True)
