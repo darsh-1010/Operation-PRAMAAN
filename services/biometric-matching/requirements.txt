@@ -10,3 +10,6 @@ pillow
 torch
 torchvision
 face-recognition
+
+# configuration
+pyyaml

@@ -1,0 +1,47 @@
+# Biometric Module 3 — Threshold Configuration
+#
+# WARNING: All values below are INITIAL PLACEHOLDERS.
+# They have NOT been calibrated against genuine/impostor validation data.
+# Do not treat them as production-ready thresholds.
+#
+# The production thresholds must be derived from:
+#   - the actual selected face-embedding model
+#   - FAR/FRR analysis on representative data
+#   - the application's risk tolerance
+#
+# Every face_verifications row persists the threshold that was actually used,
+# so decisions remain reproducible when these values are updated.
+
+face_model:
+  name: "dlib-resnet-v1"
+  version: "0.1.0-placeholder"
+  embedding_dimension: 128
+  similarity_metric: "cosine"
+  # Preprocessing applied before embedding generation
+  preprocessing_version: "align-dlib-v1"
+
+liveness:
+  review_threshold: 0.80       # below this → REVIEW
+  hard_fail_threshold: 0.20    # below this → HARD FAIL
+
+doc_to_selfie:
+  accept_threshold: 0.75       # above this → PASS
+  review_threshold: 0.60       # above this → REVIEW, below → FAIL
+  hard_fail_threshold: 0.40    # below this → HARD FAIL (high quality only)
+
+cross_document:
+  accept_threshold: 0.70
+  review_threshold: 0.55
+
+fusion:
+  liveness_weight: 0.35
+  doc_match_weight: 0.45
+  cross_document_weight: 0.20
+  accept_threshold: 0.85
+  review_threshold: 0.65
+
+quality:
+  # Minimum quality score to consider a match result reliable
+  min_reliable_quality: 0.40
+  # Below this quality, never hard-fail on similarity alone
+  low_quality_floor: 0.25
