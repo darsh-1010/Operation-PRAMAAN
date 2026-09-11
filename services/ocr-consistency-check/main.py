@@ -24,7 +24,9 @@ from decision_matrix import DecisionOutcome, evaluate_decision_matrix
 from field_extractor import ParsedDocumentData, extract_document_fields
 from ingestion import IngestedDocument, ingest_file
 from matcher import MatchOutcome, match_against_candidate
+from multilingual_service import router as multilingual_router
 from ocr_engine import OCREngine
+from script_detector import COUNTRY_TO_LANG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ocr_service")
@@ -57,6 +59,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(multilingual_router)
+
 
 # -------------------------------------------------------------
 # Request & Response Models
@@ -83,6 +87,10 @@ class ScreenResponse(BaseModel):
     claimed_expiry: Optional[str]
     claimed_gender: Optional[str]
     issuing_country: str
+    detected_language: str = "English"
+    detected_script: str = "Latin"
+    claimed_dob_bs: Optional[str] = None
+    calendar_system: str = "GREGORIAN"
     reason_codes: List[Dict[str, Any]]
     validation_checks: List[Dict[str, Any]]
     candidate_matched: bool
@@ -109,20 +117,35 @@ def health_check() -> Dict[str, Any]:
 
 
 @app.post("/api/v1/extract-only", tags=["Extraction"])
-async def extract_only(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def extract_only(
+    file: UploadFile = File(...),
+    expected_country: Optional[str] = Form(None),
+    expected_language: Optional[str] = Form(None),
+) -> Dict[str, Any]:
     """Step 1 Endpoint: Extract raw OCR text and parsed fields without running DB matching."""
     try:
         content = await file.read()
         ingested = ingest_file(content, file.filename or "")
         ocr_engine = OCREngine.get_instance()
-        ocr_res = ocr_engine.extract_text(ingested.images[0])
-        parsed = extract_document_fields(ocr_res)
+
+        ocr_lang = None
+        if expected_country and expected_country.upper() in COUNTRY_TO_LANG:
+            ocr_lang = COUNTRY_TO_LANG[expected_country.upper()][2]
+        elif expected_language:
+            ocr_lang = f"eng+{expected_language}" if expected_language != "eng" else "eng"
+
+        ocr_res = ocr_engine.extract_text(ingested.images[0], lang=ocr_lang)
+        parsed = extract_document_fields(ocr_res, expected_country=expected_country, expected_language=expected_language)
 
         return {
             "doc_type": parsed.doc_type,
             "document_number": parsed.document_number,
             "claimed_name": parsed.claimed_name,
             "claimed_dob": parsed.claimed_dob,
+            "claimed_dob_bs": parsed.claimed_dob_bs,
+            "calendar_system": parsed.calendar_system,
+            "detected_language": parsed.detected_language,
+            "detected_script": parsed.detected_script,
             "claimed_expiry": parsed.claimed_expiry,
             "claimed_gender": parsed.claimed_gender,
             "issuing_country": parsed.issuing_country,
@@ -150,6 +173,8 @@ async def screen_document(
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
     document_id: Optional[str] = Form(None),
+    expected_country: Optional[str] = Form(None),
+    expected_language: Optional[str] = Form(None),
 ) -> ScreenResponse:
     """Full Screening Pipeline: Ingestion -> OCR -> MRZ Verification -> DB Candidate Search -> Decision."""
     s_id = session_id or str(uuid.uuid4())
@@ -161,12 +186,18 @@ async def screen_document(
     except Exception as err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File ingestion error: {err}")
 
-    # 1. OCR Text Extraction
-    ocr_engine = OCREngine.get_instance()
-    ocr_res = ocr_engine.extract_text(ingested.images[0])
+    # 1. OCR Text Extraction (with regional language override if indicated)
+    ocr_lang = None
+    if expected_country and expected_country.upper() in COUNTRY_TO_LANG:
+        ocr_lang = COUNTRY_TO_LANG[expected_country.upper()][2]
+    elif expected_language:
+        ocr_lang = f"eng+{expected_language}" if expected_language != "eng" else "eng"
 
-    # 2. Field Extraction & MRZ Verification
-    parsed = extract_document_fields(ocr_res)
+    ocr_engine = OCREngine.get_instance()
+    ocr_res = ocr_engine.extract_text(ingested.images[0], lang=ocr_lang)
+
+    # 2. Field Extraction & MRZ Verification with Multilingual / Calendar Normalization
+    parsed = extract_document_fields(ocr_res, expected_country=expected_country, expected_language=expected_language)
 
     # 3. Watchlist Screening & Candidate Document Search
     search_engine = CandidateSearchEngine()
@@ -216,6 +247,10 @@ async def screen_document(
         claimed_expiry=parsed.claimed_expiry,
         claimed_gender=parsed.claimed_gender,
         issuing_country=parsed.issuing_country or "IND",
+        detected_language=parsed.detected_language,
+        detected_script=parsed.detected_script,
+        claimed_dob_bs=parsed.claimed_dob_bs,
+        calendar_system=parsed.calendar_system,
         reason_codes=[
             {"code": r.code, "message": r.message, "severity": r.severity, "contribution": r.contribution}
             for r in decision.reason_codes

@@ -39,6 +39,10 @@ export interface ScreenResponse {
   claimed_expiry: string | null;
   claimed_gender: string | null;
   issuing_country: string;
+  detected_language: string;
+  detected_script: string;
+  claimed_dob_bs: string | null;
+  calendar_system: string;
   reason_codes: ReasonCode[];
   validation_checks: ValidationCheck[];
   candidate_matched: boolean;
@@ -47,9 +51,25 @@ export interface ScreenResponse {
   extracted_fields: ExtractedField[];
 }
 
-export async function screenDocument(file: File): Promise<ScreenResponse> {
+export interface CalendarConvertResponse {
+  raw_input: string;
+  bs_year: number;
+  bs_month: number | null;
+  bs_day: number | null;
+  bs_month_name: string | null;
+  gregorian_date: string | null;
+  gregorian_primary_year: number;
+  gregorian_year_span: string;
+  is_valid: boolean;
+  detail: string;
+}
+
+export async function screenDocument(file: File, expectedCountry?: string): Promise<ScreenResponse> {
   const form = new FormData();
   form.append("file", file);
+  if (expectedCountry) {
+    form.append("expected_country", expectedCountry);
+  }
   const res = await fetch(`${OCR_SERVICE_URL}/api/v1/screen`, {
     method: "POST",
     body: form,
@@ -57,6 +77,19 @@ export async function screenDocument(file: File): Promise<ScreenResponse> {
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Screening failed (${res.status}): ${detail}`);
+  }
+  return res.json();
+}
+
+export async function convertNepaliCalendar(dateOrYear: string): Promise<CalendarConvertResponse> {
+  const res = await fetch(`${OCR_SERVICE_URL}/api/v1/multilingual/convert-calendar`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date_or_year: dateOrYear }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Calendar conversion failed (${res.status}): ${detail}`);
   }
   return res.json();
 }

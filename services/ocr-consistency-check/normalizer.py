@@ -107,15 +107,21 @@ def normalize_id_number(id_str: Optional[str]) -> Optional[str]:
 def normalize_bikram_sambat_date(bs_date_str: Optional[str]) -> Optional[str]:
     """Convert a Nepali Bikram Sambat (B.S.) date string to ISO-8601 Gregorian.
 
-    Nepali driving licences and citizenship documents print dates in the B.S.
-    calendar (~56-57 years ahead of A.D.), not Gregorian — even when the
-    digits and label are in English/Latin script, treating them as a normal
-    Gregorian date via normalize_date() gives a wrong year. Call this
-    explicitly once a document has been identified as Nepali; it is not
-    wired into the default extraction flow.
+    Supports:
+    - Numeric dates: '2082-04-25', '25/04/2082', '2082/04/25'
+    - Devanagari numerals: '२०८२/०४/२५', '२५/०४/२०८२'
+    - Textual Nepali months: '15 Baishakh 2080', '१५ बैशाख २०८०'
     """
     if not bs_date_str:
         return None
+
+    try:
+        from nepali_calendar import convert_bikram_sambat
+        res = convert_bikram_sambat(bs_date_str)
+        if res.is_valid and res.gregorian_date:
+            return res.gregorian_date
+    except Exception:
+        pass
 
     iso = normalize_date(bs_date_str)
     if not iso:
