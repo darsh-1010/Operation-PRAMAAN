@@ -1,0 +1,40 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/.env
+    depends_on:
+      - ocr-consistency-check
+      - visual-image-forensics
+      - biometric-matching
+      - risk-scoring-engine
+
+  ocr-consistency-check:
+    build: ./services/ocr-consistency-check
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./services/ocr-consistency-check/.env
+
+  visual-image-forensics:
+    build: ./services/visual-image-forensics
+    ports:
+      - "8002:8002"
+    env_file:
+      - ./services/visual-image-forensics/.env
+
+  biometric-matching:
+    build: ./services/biometric-matching
+    ports:
+      - "8003:8003"
+    env_file:
+      - ./services/biometric-matching/.env
+
+  risk-scoring-engine:
+    build: ./services/risk-scoring-engine
+    ports:
+      - "8004:8004"
+    env_file:
+      - ./services/risk-scoring-engine/.env

@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# image forensics / CNN-based checks
+opencv-python-headless
+numpy
+pillow
+torch
+torchvision

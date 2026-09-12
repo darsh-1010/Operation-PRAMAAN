@@ -1,0 +1,23 @@
+# env
+.env
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# node
+node_modules/
+dist/
+build/
+
+# os
+.DS_Store
+
+# graphify
+graphify-out/
+
+# scratch test datasets (large binary test fixtures, not source)
+dataset-raw/
