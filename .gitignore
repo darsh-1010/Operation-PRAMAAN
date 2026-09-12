@@ -18,3 +18,6 @@ build/
 
 # graphify
 graphify-out/
+
+# scratch test datasets (large binary test fixtures, not source)
+dataset-raw/
