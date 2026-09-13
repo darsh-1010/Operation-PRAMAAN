@@ -104,38 +104,6 @@ def normalize_id_number(id_str: Optional[str]) -> Optional[str]:
     return cleaned if cleaned else None
 
 
-def normalize_bikram_sambat_date(bs_date_str: Optional[str]) -> Optional[str]:
-    """Convert a Nepali Bikram Sambat (B.S.) date string to ISO-8601 Gregorian.
-
-    Supports:
-    - Numeric dates: '2082-04-25', '25/04/2082', '2082/04/25'
-    - Devanagari numerals: '२०८२/०४/२५', '२५/०४/२०८२'
-    - Textual Nepali months: '15 Baishakh 2080', '१५ बैशाख २०८०'
-    """
-    if not bs_date_str:
-        return None
-
-    try:
-        from nepali_calendar import convert_bikram_sambat
-        res = convert_bikram_sambat(bs_date_str)
-        if res.is_valid and res.gregorian_date:
-            return res.gregorian_date
-    except Exception:
-        pass
-
-    iso = normalize_date(bs_date_str)
-    if not iso:
-        return None
-
-    try:
-        import nepali_datetime
-        y, m, d = (int(x) for x in iso.split("-"))
-        bs_date = nepali_datetime.date(y, m, d)
-        return bs_date.to_datetime_date().isoformat()
-    except (ImportError, ValueError):
-        return None
-
-
 def normalize_gender(gender_str: Optional[str]) -> Optional[str]:
     """Normalize gender code to 'M', 'F', or 'X'."""
     if not gender_str:
