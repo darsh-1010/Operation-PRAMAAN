@@ -109,7 +109,41 @@ class OCREngine:
         blocks: List[TextBlock] = []
         confidences: List[float] = []
 
-        if raw_res:
+        if raw_res and isinstance(raw_res, list) and len(raw_res) > 0 and isinstance(raw_res[0], dict):
+            # PaddleX 3.x pipeline result: one dict per image, with parallel
+            # rec_texts/rec_scores/rec_polys lists rather than one item per text box.
+            page = raw_res[0]
+            rec_texts = page.get("rec_texts", [])
+            rec_scores = page.get("rec_scores", [])
+            rec_polys = page.get("rec_polys", page.get("dt_polys", []))
+            for idx, text in enumerate(rec_texts):
+                text_clean = str(text).strip()
+                if not text_clean:
+                    continue
+                conf_val = round(float(rec_scores[idx]), 4) if idx < len(rec_scores) else 0.9
+                polygon = rec_polys[idx] if idx < len(rec_polys) else []
+                polygon = polygon.tolist() if hasattr(polygon, "tolist") else list(polygon)
+
+                if polygon and len(polygon) >= 4:
+                    xs = [pt[0] for pt in polygon]
+                    ys = [pt[1] for pt in polygon]
+                    bbox = {
+                        "x": round(float(min(xs)), 2),
+                        "y": round(float(min(ys)), 2),
+                        "w": round(float(max(xs) - min(xs)), 2),
+                        "h": round(float(max(ys) - min(ys)), 2),
+                    }
+                else:
+                    bbox = {"x": 0.0, "y": 0.0, "w": float(image.shape[1]), "h": 20.0}
+
+                confidences.append(conf_val)
+                blocks.append(TextBlock(
+                    text=text_clean,
+                    confidence=conf_val,
+                    bbox=bbox,
+                    polygon=[[round(float(p[0]), 2), round(float(p[1]), 2)] for p in polygon] if polygon else [],
+                ))
+        elif raw_res:
             # Handle list of items or list of lists
             items = raw_res[0] if (isinstance(raw_res, list) and len(raw_res) > 0 and isinstance(raw_res[0], list)) else raw_res
 
