@@ -405,22 +405,35 @@ async def screen(
     if not uploaded:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No documents uploaded")
 
+    s_uuid = _ensure_uuid(uuid)
+    db = DatabaseManager.get_instance()
+    try:
+        db.upsert_screening_session(session_id=s_uuid, pipeline_version="v1.0.0", status="PROCESSING")
+    except Exception as err:
+        logger.error("Failed to open screening session %s: %s", s_uuid, err, exc_info=True)
+
     reason_codes: List[str] = []
     scores: List[float] = []
+    canonical_scores: List[float] = []
     hard_fail = False
     parsed_docs: List[ParsedDocumentData] = []
 
     for key, file in uploaded:
         content = await file.read()
         try:
-            _, _, parsed, _, decision, _, _ = _run_screening_pipeline(content, file.filename or key)
+            ingested, ocr_res, parsed, _, decision, watchlist_hits, _ = _run_screening_pipeline(content, file.filename or key)
         except Exception as err:
             logger.error("Screening failed for %s: %s", key, err)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{key}: {err}")
         parsed_docs.append(parsed)
         scores.append(decision.score)
+        canonical_scores.append(decision.canonical_score)
         hard_fail = hard_fail or decision.hard_fail
         reason_codes.extend(r.code for r in decision.reason_codes)
+        try:
+            _persist_document_extraction(db, s_uuid, _ensure_uuid(None), ingested, ocr_res, parsed, decision, watchlist_hits)
+        except Exception as err:
+            logger.error("Failed to persist document '%s' for session %s: %s", key, s_uuid, err, exc_info=True)
 
     if len(parsed_docs) > 1:
         cross = cross_check_documents(parsed_docs)
@@ -428,7 +441,31 @@ async def screen(
             hard_fail = True
             reason_codes.append("cross_document_mismatch")
 
-    return {"score": min(scores) if scores else 0, "hard_fail": hard_fail, "reason_codes": reason_codes}
+    final_score = min(scores) if scores else 0
+    final_canonical_score = min(canonical_scores) if canonical_scores else 0.0
+
+    # Final module score, at the point this result is handed off to the risk-scoring
+    # engine (per API_CONTRACT.md, the frontend collects every module's /screen response
+    # and forwards them there) — this is Module 1's contribution ("score_kind='A'").
+    try:
+        db.upsert_module_score(
+            session_id=s_uuid,
+            score_kind="A",
+            value=final_canonical_score,
+            detail={"reason_codes": reason_codes, "documents_screened": len(parsed_docs)},
+        )
+        db.upsert_screening_session(session_id=s_uuid, status="FAILED" if hard_fail else "COMPLETED")
+        db.insert_audit_log(
+            session_id=s_uuid,
+            action="OCR_MODULE_SCREENING_COMPLETED",
+            entity_type="SESSION",
+            entity_id=s_uuid,
+            payload={"score": final_score, "canonical_score": final_canonical_score, "hard_fail": hard_fail, "reason_codes": reason_codes},
+        )
+    except Exception as err:
+        logger.error("Failed to persist module score for session %s: %s", s_uuid, err, exc_info=True)
+
+    return {"score": final_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
 
 
 def _ensure_uuid(val: Optional[str]) -> str:
@@ -442,6 +479,110 @@ def _ensure_uuid(val: Optional[str]) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, str(val)))
 
 
+def _persist_document_extraction(
+    db: DatabaseManager,
+    session_id: str,
+    document_id: str,
+    ingested: IngestedDocument,
+    ocr_res: Any,
+    parsed: ParsedDocumentData,
+    decision: DecisionOutcome,
+    watchlist_hits: List[Any],
+) -> str:
+    """Persist one document's extraction artifacts (claim, capture, OCR run, fields,
+    validation checks, watchlist hits, per-document audit entry). Does NOT touch
+    screening_sessions or module_scores — those are session-level and owned by the
+    caller, since one session can span multiple documents (see /screen below).
+    Returns the extraction_id."""
+    s_uuid = _ensure_uuid(session_id)
+    d_uuid = _ensure_uuid(document_id)
+    extraction_uuid = str(uuid.uuid4())
+
+    db.insert_document(
+        document_id=d_uuid,
+        session_id=s_uuid,
+        doc_type=parsed.doc_type,
+        document_number=parsed.document_number,
+        claimed_name=parsed.claimed_name,
+        claimed_dob=parsed.claimed_dob,
+        claimed_expiry=parsed.claimed_expiry,
+        claimed_gender=parsed.claimed_gender,
+        issuing_country=parsed.issuing_country or "IND",
+    )
+
+    storage_ext = ingested.mime_type.split("/")[-1] if "/" in ingested.mime_type else "png"
+    storage_uri = f"uploads/{d_uuid}.{storage_ext}"
+    db.insert_capture(
+        session_id=s_uuid,
+        document_id=d_uuid,
+        kind="DOCUMENT_PHOTO",
+        storage_uri=storage_uri,
+        sha256=ingested.sha256,
+        mime_type=ingested.mime_type,
+        width_px=ingested.width_px,
+        height_px=ingested.height_px,
+    )
+
+    mrz_raw_text = "\n".join(parsed.mrz_result.raw_lines) if (parsed.mrz_result and parsed.mrz_result.raw_lines) else None
+    db.insert_ocr_extraction(
+        extraction_id=extraction_uuid,
+        document_id=d_uuid,
+        engine=getattr(ocr_res, "engine", "tesseract-5"),
+        model_version=getattr(ocr_res, "model_version", "standard"),
+        mrz_raw=mrz_raw_text,
+        overall_confidence=getattr(ocr_res, "average_confidence", 0.90),
+    )
+
+    for f in parsed.fields:
+        db.insert_extracted_field(
+            extraction_id=extraction_uuid,
+            document_id=d_uuid,
+            field_key=f.field_key,
+            field_value=f.field_value,
+            source=f.source,
+            confidence=f.confidence,
+            bbox=f.bbox,
+        )
+
+    for c in decision.validation_checks:
+        db.insert_validation_check(
+            document_id=d_uuid,
+            module="MODULE_1",
+            check_type=c.check_type,
+            field_key=c.field_key,
+            status=c.status,
+            is_hard_fail=c.is_hard_fail,
+            expected_value=c.expected_value,
+            observed_value=c.observed_value,
+            detail=c.detail,
+        )
+
+    for h in watchlist_hits:
+        db.insert_watchlist_hit(
+            session_id=s_uuid,
+            document_id=d_uuid,
+            entry_id=h.entry_id,
+            match_basis=h.match_basis,
+            match_score=h.match_score,
+            is_hard_fail=h.is_hard_fail,
+        )
+
+    db.insert_audit_log(
+        session_id=s_uuid,
+        action="OCR_DOCUMENT_EXTRACTED",
+        entity_type="DOCUMENT",
+        entity_id=d_uuid,
+        payload={
+            "extraction_id": extraction_uuid,
+            "score": decision.score,
+            "canonical_score": decision.canonical_score,
+            "status": decision.status,
+            "hard_fail": decision.hard_fail,
+        },
+    )
+    return extraction_uuid
+
+
 def _persist_screening_session(
     session_id: str,
     document_id: str,
@@ -451,114 +592,15 @@ def _persist_screening_session(
     decision: DecisionOutcome,
     watchlist_hits: List[Any],
 ) -> None:
-    """Save screening audit artifacts into relational schema according to DB plan."""
+    """Persist a single-document screening (used by /api/v1/screen): session lifecycle,
+    document extraction, and the module score in one call."""
     db = DatabaseManager.get_instance()
     try:
         s_uuid = _ensure_uuid(session_id)
-        d_uuid = _ensure_uuid(document_id)
-        extraction_uuid = str(uuid.uuid4())
-
-        # 1. Screening session lifecycle (PROCESSING -> COMPLETED/FAILED)
         sess_status = "COMPLETED" if not decision.hard_fail else "FAILED"
         db.upsert_screening_session(session_id=s_uuid, pipeline_version="v1.0.0", status=sess_status)
-
-        # 2. Document claim record
-        db.insert_document(
-            document_id=d_uuid,
-            session_id=s_uuid,
-            doc_type=parsed.doc_type,
-            document_number=parsed.document_number,
-            claimed_name=parsed.claimed_name,
-            claimed_dob=parsed.claimed_dob,
-            claimed_expiry=parsed.claimed_expiry,
-            claimed_gender=parsed.claimed_gender,
-            issuing_country=parsed.issuing_country or "IND",
-        )
-
-        # 3. Capture metadata
-        storage_ext = ingested.mime_type.split("/")[-1] if "/" in ingested.mime_type else "png"
-        storage_uri = f"uploads/{d_uuid}.{storage_ext}"
-        db.insert_capture(
-            session_id=s_uuid,
-            document_id=d_uuid,
-            kind="DOCUMENT_PHOTO",
-            storage_uri=storage_uri,
-            sha256=ingested.sha256,
-            mime_type=ingested.mime_type,
-            width_px=ingested.width_px,
-            height_px=ingested.height_px,
-        )
-
-        # 4. OCR Extraction run metadata
-        mrz_raw_text = "\n".join(parsed.mrz_result.raw_lines) if (parsed.mrz_result and parsed.mrz_result.raw_lines) else None
-        db.insert_ocr_extraction(
-            extraction_id=extraction_uuid,
-            document_id=d_uuid,
-            engine=getattr(ocr_res, "engine", "tesseract-5"),
-            model_version=getattr(ocr_res, "model_version", "standard"),
-            mrz_raw=mrz_raw_text,
-            overall_confidence=getattr(ocr_res, "average_confidence", 0.90),
-        )
-
-        # 5. Extracted key-value fields with confidence and bounding boxes
-        for f in parsed.fields:
-            db.insert_extracted_field(
-                extraction_id=extraction_uuid,
-                document_id=d_uuid,
-                field_key=f.field_key,
-                field_value=f.field_value,
-                source=f.source,
-                confidence=f.confidence,
-                bbox=f.bbox,
-            )
-
-        # 6. Validation checks
-        for c in decision.validation_checks:
-            db.insert_validation_check(
-                document_id=d_uuid,
-                module="MODULE_1",
-                check_type=c.check_type,
-                field_key=c.field_key,
-                status=c.status,
-                is_hard_fail=c.is_hard_fail,
-                expected_value=c.expected_value,
-                observed_value=c.observed_value,
-                detail=c.detail,
-            )
-
-        # 7. Watchlist hits (if any positive hits found)
-        for h in watchlist_hits:
-            db.insert_watchlist_hit(
-                session_id=s_uuid,
-                document_id=d_uuid,
-                entry_id=h.entry_id,
-                match_basis=h.match_basis,
-                match_score=h.match_score,
-                is_hard_fail=h.is_hard_fail,
-            )
-
-        # 8. Module score A
-        db.upsert_module_score(
-            session_id=s_uuid,
-            score_kind="A",
-            value=decision.canonical_score,
-            detail=decision.sub_scores,
-        )
-
-        # 9. Immutable audit trail entry
-        db.insert_audit_log(
-            session_id=s_uuid,
-            action="OCR_SCREENING_COMPLETED",
-            entity_type="DOCUMENT",
-            entity_id=d_uuid,
-            payload={
-                "extraction_id": extraction_uuid,
-                "score": decision.score,
-                "canonical_score": decision.canonical_score,
-                "status": decision.status,
-                "hard_fail": decision.hard_fail,
-            },
-        )
+        _persist_document_extraction(db, s_uuid, document_id, ingested, ocr_res, parsed, decision, watchlist_hits)
+        db.upsert_module_score(session_id=s_uuid, score_kind="A", value=decision.canonical_score, detail=decision.sub_scores)
         logger.info("Screening session %s audit and extractions successfully persisted to database.", s_uuid)
     except Exception as err:
         logger.error("Audit persistence failure: %s", err, exc_info=True)
