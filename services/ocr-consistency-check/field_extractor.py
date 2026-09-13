@@ -78,7 +78,7 @@ def extract_regex_value(full_text: str, pattern: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def extract_document_fields(ocr_result: OCRResult) -> ParsedDocumentData:
+def extract_document_fields(ocr_result: OCRResult, expected_country: Optional[str] = None) -> ParsedDocumentData:
     """Orchestrate extraction across MRZ and Visual Inspection Zone (VIZ)."""
     lines = ocr_result.lines
     full_text = ocr_result.full_text
@@ -120,10 +120,10 @@ def extract_document_fields(ocr_result: OCRResult) -> ParsedDocumentData:
     final_exp = norm_exp
     final_sex = norm_sex
     final_doc_num = norm_doc_num
-    country = "IND"
+    country = expected_country or "IND"
 
     if mrz and mrz.valid_format:
-        country = mrz.issuing_country or "IND"
+        country = expected_country or mrz.issuing_country or "IND"
         if mrz.document_number:
             if norm_doc_num and norm_doc_num != mrz.document_number:
                 inconsistencies.append(f"Doc number mismatch: VIZ '{norm_doc_num}' vs MRZ '{mrz.document_number}'")

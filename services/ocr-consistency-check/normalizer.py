@@ -116,3 +116,16 @@ def normalize_gender(gender_str: Optional[str]) -> Optional[str]:
         return "F"
     return "X"
 
+
+def normalize_bikram_sambat_date(bs_str: Optional[str]) -> Optional[str]:
+    """Convert a Bikram Sambat date string to Gregorian ISO YYYY-MM-DD date."""
+    if not bs_str:
+        return None
+    try:
+        from nepali_calendar import convert_bikram_sambat
+        res = convert_bikram_sambat(bs_str)
+        return res.gregorian_date if res.is_valid else None
+    except Exception:
+        return None
+
+

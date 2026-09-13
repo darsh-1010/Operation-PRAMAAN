@@ -163,12 +163,29 @@ class OCREngine:
         )
 
     def _extract_tesseract(self, image: np.ndarray) -> OCRResult:
-        """Fallback extraction using pytesseract when PaddleOCR is not available."""
+        """High-accuracy fallback extraction using pytesseract with preprocessing and MRZ crop."""
         try:
+            import cv2
             import pytesseract
-            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+
+            h, w = image.shape[:2]
+            # Preprocessing: upscale low-resolution uploads (identity docs need >= 1200px width)
+            scale = max(1.0, 1200.0 / w)
+            if scale > 1.05:
+                proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+            else:
+                proc_img = image
+
+            if len(proc_img.shape) == 3:
+                gray = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = proc_img
+
+            # Extract word data with line groupings
+            data = pytesseract.image_to_data(gray, config="--psm 6", output_type=pytesseract.Output.DICT)
             blocks: List[TextBlock] = []
             confidences: List[float] = []
+            lines_map: Dict[Any, List[str]] = {}
 
             n_boxes = len(data["text"])
             for i in range(n_boxes):
@@ -179,15 +196,35 @@ class OCREngine:
 
                 conf = round(conf_raw / 100.0, 4)
                 bbox = {
-                    "x": float(data["left"][i]),
-                    "y": float(data["top"][i]),
-                    "w": float(data["width"][i]),
-                    "h": float(data["height"][i]),
+                    "x": round(float(data["left"][i]) / scale, 2),
+                    "y": round(float(data["top"][i]) / scale, 2),
+                    "w": round(float(data["width"][i]) / scale, 2),
+                    "h": round(float(data["height"][i]) / scale, 2),
                 }
                 confidences.append(conf)
                 blocks.append(TextBlock(text=text, confidence=conf, bbox=bbox))
 
-            lines = [b.text for b in blocks]
+                line_key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+                if line_key not in lines_map:
+                    lines_map[line_key] = []
+                lines_map[line_key].append(text)
+
+            lines = [" ".join(words) for words in lines_map.values() if words]
+
+            # If MRZ not clearly detected in main pass, run dedicated MRZ bottom scan
+            has_mrz = any("<" in l and len(l) >= 25 for l in lines)
+            if not has_mrz and h >= 100:
+                mrz_h_start = int(gray.shape[0] * 0.70)
+                mrz_crop = gray[mrz_h_start:, :]
+                mrz_text = pytesseract.image_to_string(
+                    mrz_crop,
+                    config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+                )
+                for m_line in mrz_text.splitlines():
+                    m_clean = m_line.strip()
+                    if "<" in m_clean and len(m_clean) >= 20:
+                        lines.append(m_clean)
+
             avg_conf = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
             return OCRResult(
                 blocks=blocks,
@@ -207,3 +244,4 @@ class OCREngine:
                 model_version="none",
                 average_confidence=0.0,
             )
+

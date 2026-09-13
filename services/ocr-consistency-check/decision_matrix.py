@@ -261,3 +261,135 @@ def evaluate_decision_matrix(
         sub_scores=sub_scores,
     )
 
+
+def _validate_field_formats(doc: ParsedDocumentData) -> List[ValidationCheckRecord]:
+    """Validate format and semantics of extracted fields for cross-document consistency."""
+    import datetime
+    checks: List[ValidationCheckRecord] = []
+
+    # 1. Name check
+    if doc.claimed_name and len(doc.claimed_name.strip()) >= 2:
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT",
+            field_key="name",
+            status="PASS",
+            is_hard_fail=False,
+            expected_value="NON_EMPTY",
+            observed_value=doc.claimed_name,
+            detail="Name is formatted correctly.",
+        ))
+    else:
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT",
+            field_key="name",
+            status="FAIL",
+            is_hard_fail=False,
+            expected_value="NON_EMPTY",
+            observed_value=doc.claimed_name,
+            detail="Name is missing or invalid.",
+        ))
+
+    # 2. DOB check
+    if doc.claimed_dob:
+        try:
+            dob_dt = datetime.date.fromisoformat(doc.claimed_dob)
+            if dob_dt > datetime.date.today():
+                checks.append(ValidationCheckRecord(
+                    check_type="FIELD_FORMAT",
+                    field_key="dob",
+                    status="FAIL",
+                    is_hard_fail=False,
+                    expected_value="PAST_DATE",
+                    observed_value=doc.claimed_dob,
+                    detail="Date of birth cannot be in the future.",
+                ))
+            else:
+                checks.append(ValidationCheckRecord(
+                    check_type="FIELD_FORMAT",
+                    field_key="dob",
+                    status="PASS",
+                    is_hard_fail=False,
+                    expected_value="PAST_DATE",
+                    observed_value=doc.claimed_dob,
+                    detail="Date of birth is valid.",
+                ))
+        except ValueError:
+            checks.append(ValidationCheckRecord(
+                check_type="FIELD_FORMAT",
+                field_key="dob",
+                status="FAIL",
+                is_hard_fail=False,
+                expected_value="YYYY-MM-DD",
+                observed_value=doc.claimed_dob,
+                detail="Date of birth has invalid format.",
+            ))
+    else:
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT",
+            field_key="dob",
+            status="WARN",
+            is_hard_fail=False,
+            expected_value="YYYY-MM-DD",
+            observed_value=None,
+            detail="Date of birth is missing.",
+        ))
+
+    # 3. Document number check
+    if doc.document_number and len(doc.document_number.strip()) >= 3:
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT",
+            field_key="document_number",
+            status="PASS",
+            is_hard_fail=False,
+            expected_value="VALID_ID",
+            observed_value=doc.document_number,
+            detail="Document number is formatted correctly.",
+        ))
+    else:
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT",
+            field_key="document_number",
+            status="FAIL",
+            is_hard_fail=False,
+            expected_value="VALID_ID",
+            observed_value=doc.document_number,
+            detail="Document number is missing or too short.",
+        ))
+
+    # 4. Expiry check
+    if doc.claimed_expiry:
+        try:
+            datetime.date.fromisoformat(doc.claimed_expiry)
+            checks.append(ValidationCheckRecord(
+                check_type="FIELD_FORMAT",
+                field_key="expiry",
+                status="PASS",
+                is_hard_fail=False,
+                expected_value="DATE",
+                observed_value=doc.claimed_expiry,
+                detail="Expiry date format is valid.",
+            ))
+        except ValueError:
+            checks.append(ValidationCheckRecord(
+                check_type="FIELD_FORMAT",
+                field_key="expiry",
+                status="FAIL",
+                is_hard_fail=False,
+                expected_value="DATE",
+                observed_value=doc.claimed_expiry,
+                detail="Expiry date format is invalid.",
+            ))
+    else:
+        checks.append(ValidationCheckRecord(
+            check_type="FIELD_FORMAT",
+            field_key="expiry",
+            status="WARN",
+            is_hard_fail=False,
+            expected_value="DATE",
+            observed_value=None,
+            detail="Expiry date is missing.",
+        ))
+
+    return checks
+
+
