@@ -80,8 +80,17 @@ class OCREngine:
             self._paddle_ocr = None
             self._engine_name = "tesseract-fallback"
 
-    def extract_text(self, image: np.ndarray) -> OCRResult:
-        """Extract text blocks, lines, and bounding boxes from an RGB image."""
+    def extract_text(self, image: np.ndarray, lang: Optional[str] = None) -> OCRResult:
+        """Extract text blocks, lines, and bounding boxes from an RGB image.
+
+        If a regional language is requested (e.g. 'eng+nep', 'nep', 'hin', 'ben', 'urd'),
+        routes to the dedicated multilingual Tesseract engine instead of the default
+        PaddleOCR / English-Tesseract path below.
+        """
+        if lang and lang.lower() not in ("en", "eng"):
+            from multilingual_ocr import MultilingualOCREngine
+            return MultilingualOCREngine.get_instance().extract_text(image, lang=lang)
+
         if self._paddle_ocr is not None:
             try:
                 return self._extract_paddle(image)

@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from mrz_verifier import MRZCheckResult, extract_and_verify_mrz
+from nepali_calendar import convert_bikram_sambat
 from normalizer import normalize_date, normalize_gender, normalize_id_number, normalize_name
 from ocr_engine import OCRResult, TextBlock
+from script_detector import detect_script_and_language
 
 
 @dataclass
@@ -38,18 +40,28 @@ class ParsedDocumentData:
     mrz_result: Optional[MRZCheckResult] = None
     viz_mrz_consistent: bool = True
     inconsistencies: List[str] = field(default_factory=list)
+    detected_language: str = "English"
+    detected_script: str = "Latin"
+    claimed_dob_bs: Optional[str] = None
+    calendar_system: str = "GREGORIAN"
 
 
 def detect_document_type(full_text: str) -> str:
-    """Infer document type from text tokens."""
+    """Infer document type from text tokens across English and regional scripts."""
     upper = full_text.upper()
-    if "PASSPORT" in upper or "REPUBLIC OF INDIA" in upper and "PASSPORT" in upper:
+    if "PASSPORT" in upper or "राहदानी" in full_text or ("REPUBLIC OF INDIA" in upper and "PASSPORT" in upper):
         return "PASSPORT"
-    if "DRIVING" in upper or "LICENCE" in upper or "LICENSE" in upper:
+    if "DRIVING" in upper or "LICENCE" in upper or "LICENSE" in upper or "चालक अनुमतिपत्र" in full_text or "सवारी चालक" in full_text:
         return "DRIVING_LICENSE"
-    if "AADHAAR" in upper or "UNIQUE IDENTIFICATION" in upper or "PAN CARD" in upper:
+    if (
+        "AADHAAR" in upper
+        or "UNIQUE IDENTIFICATION" in upper
+        or "PAN CARD" in upper
+        or "नागरिकता" in full_text
+        or "CITIZENSHIP" in upper
+    ):
         return "NATIONAL_ID"
-    if "VISA" in upper:
+    if "VISA" in upper or "भिसा" in full_text:
         return "VISA"
     return "NATIONAL_ID"
 
@@ -61,13 +73,13 @@ def extract_labeled_field(lines: List[str], label_pattern: str, max_lookahead: i
         if match:
             # Check if value is on the same line after a colon or space
             remainder = line[match.end():].strip().lstrip(":").strip()
-            if len(remainder) >= 2 and not re.search(r"^(OF|AND|THE|NO)\b", remainder, re.I):
+            if len(remainder) >= 2 and not re.search(r"^(OF|AND|THE|NO|को|नं)\b", remainder, re.I):
                 return remainder
             # Look at next line(s)
             for offset in range(1, max_lookahead + 1):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
-                    if candidate and not re.search(r"(NAME|DOB|DATE|SEX|PASSPORT|NUMBER|EXPIRY)", candidate, re.I):
+                    if candidate and not re.search(r"(NAME|DOB|DATE|SEX|PASSPORT|NUMBER|EXPIRY|नाम|मिति|लिंग)", candidate, re.I):
                         return candidate
     return None
 
@@ -78,21 +90,32 @@ def extract_regex_value(full_text: str, pattern: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def extract_document_fields(ocr_result: OCRResult, expected_country: Optional[str] = None) -> ParsedDocumentData:
-    """Orchestrate extraction across MRZ and Visual Inspection Zone (VIZ)."""
+def extract_document_fields(
+    ocr_result: OCRResult,
+    expected_country: Optional[str] = None,
+    expected_language: Optional[str] = None,
+) -> ParsedDocumentData:
+    """Orchestrate extraction across MRZ, VIZ, and regional language/calendar formats."""
     lines = ocr_result.lines
     full_text = ocr_result.full_text
     fields_list: List[ExtractedField] = []
+
+    # Step 0: Language and script classification (drives label anchors + calendar handling below)
+    lang_info = detect_script_and_language(full_text, expected_country, expected_language)
 
     # Step 1: Detect and verify MRZ if present
     mrz = extract_and_verify_mrz(lines)
     doc_type = mrz.doc_type if (mrz and mrz.valid_format) else detect_document_type(full_text)
 
-    # Step 2: Extract VIZ fields
-    viz_name_raw = extract_labeled_field(lines, r"\b(GIVEN\s*NAME[S]?|NAME|SURNAME|FULL\s*NAME)\b")
-    viz_dob_raw = extract_labeled_field(lines, r"\b(DATE\s*OF\s*BIRTH|DOB|D\.O\.B|BIRTH\s*DATE)\b")
-    viz_exp_raw = extract_labeled_field(lines, r"\b(DATE\s*OF\s*EXPIRY|EXPIRY\s*DATE|VALID\s*UNTIL|EXP)\b")
-    viz_sex_raw = extract_labeled_field(lines, r"\b(SEX|GENDER)\b")
+    # Step 2: Extract VIZ fields, with regional label anchors alongside the English ones
+    viz_name_raw = extract_labeled_field(lines, r"\b(GIVEN\s*NAME[S]?|NAME|SURNAME|FULL\s*NAME|नाम|नाम,\s*थर|थर)\b")
+    viz_dob_raw = extract_labeled_field(
+        lines, r"\b(DATE\s*OF\s*BIRTH|DOB|D\.O\.B|BIRTH\s*DATE|जन्म\s*मिति|जन्म\s*तिथि|वि\.सं\.?)\b"
+    )
+    viz_exp_raw = extract_labeled_field(
+        lines, r"\b(DATE\s*OF\s*EXPIRY|EXPIRY\s*DATE|VALID\s*UNTIL|EXP|म्याद|अवधि|बहाल\s*रहने\s*अवधि)\b"
+    )
+    viz_sex_raw = extract_labeled_field(lines, r"\b(SEX|GENDER|लिंग)\b")
 
     # Document number regexes based on type
     doc_num_raw: Optional[str] = None
@@ -107,11 +130,38 @@ def extract_document_fields(ocr_result: OCRResult, expected_country: Optional[st
         doc_num_raw = extract_labeled_field(lines, r"\b(PASSPORT\s*NO|DOC\s*NO|ID\s*NO|NUMBER)\b")
 
     # Step 3: Normalize VIZ fields
-    norm_name = normalize_name(viz_name_raw)
-    norm_dob = normalize_date(viz_dob_raw)
+    norm_name = normalize_name(viz_name_raw) if (viz_name_raw and re.search(r"[A-Za-z]", viz_name_raw)) else (
+        viz_name_raw.strip() if viz_name_raw else None
+    )
     norm_exp = normalize_date(viz_exp_raw)
     norm_sex = normalize_gender(viz_sex_raw)
     norm_doc_num = normalize_id_number(doc_num_raw)
+
+    # Nepali Bikram Sambat (B.S.) date handling: DOB printed in BS, not Gregorian
+    claimed_dob_bs: Optional[str] = None
+    calendar_system = "GREGORIAN"
+    is_nepali_doc = (
+        expected_country == "NPL"
+        or lang_info.language_code == "nep"
+        or bool(
+            viz_dob_raw
+            and re.search(
+                r"[०-९]|(वि\.?सं\.?|B\.?S\.?|बैशाख|जेठ|असार|साउन|भदौ|असोज|कात्तिक|मंसिर|पुष|माघ|फागुन|चैत)",
+                viz_dob_raw,
+            )
+        )
+    )
+
+    if is_nepali_doc and viz_dob_raw:
+        cal_res = convert_bikram_sambat(viz_dob_raw)
+        if cal_res.is_valid and cal_res.gregorian_date:
+            norm_dob = cal_res.gregorian_date
+            claimed_dob_bs = viz_dob_raw
+            calendar_system = "BIKRAM_SAMBAT"
+        else:
+            norm_dob = normalize_date(viz_dob_raw)
+    else:
+        norm_dob = normalize_date(viz_dob_raw)
 
     # Step 4: Reconcile with MRZ (MRZ takes precedence for travel docs, but cross-checks VIZ)
     inconsistencies: List[str] = []
@@ -120,7 +170,7 @@ def extract_document_fields(ocr_result: OCRResult, expected_country: Optional[st
     final_exp = norm_exp
     final_sex = norm_sex
     final_doc_num = norm_doc_num
-    country = expected_country or "IND"
+    country = expected_country or ("NPL" if is_nepali_doc else "IND")
 
     if mrz and mrz.valid_format:
         country = expected_country or mrz.issuing_country or "IND"
@@ -174,5 +224,9 @@ def extract_document_fields(ocr_result: OCRResult, expected_country: Optional[st
         mrz_result=mrz,
         viz_mrz_consistent=(len(inconsistencies) == 0),
         inconsistencies=inconsistencies,
+        detected_language=lang_info.language_name,
+        detected_script=lang_info.detected_script,
+        claimed_dob_bs=claimed_dob_bs,
+        calendar_system=calendar_system,
     )
 

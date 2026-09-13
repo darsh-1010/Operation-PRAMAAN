@@ -7,6 +7,7 @@ and weighted Score A calculation.
 """
 
 from __future__ import annotations
+import json
 import logging
 import os
 import uuid
@@ -24,7 +25,9 @@ from field_extractor import ParsedDocumentData, extract_document_fields
 from ingestion import IngestedDocument, ingest_file
 from cross_document import cross_check_documents
 from matcher import MatchOutcome, match_against_candidate
+from multilingual_service import router as multilingual_router
 from ocr_engine import OCREngine
+from script_detector import COUNTRY_TO_LANG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ocr_service")
@@ -57,6 +60,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(multilingual_router)
+
 
 # -------------------------------------------------------------
 # Request & Response Models
@@ -83,6 +88,10 @@ class ScreenResponse(BaseModel):
     claimed_expiry: Optional[str]
     claimed_gender: Optional[str]
     issuing_country: str
+    detected_language: str = "English"
+    detected_script: str = "Latin"
+    claimed_dob_bs: Optional[str] = None
+    calendar_system: str = "GREGORIAN"
     reason_codes: List[Dict[str, Any]]
     validation_checks: List[Dict[str, Any]]
     candidate_matched: bool
@@ -108,21 +117,41 @@ def health_check() -> Dict[str, Any]:
     }
 
 
+def _resolve_ocr_lang(expected_country: Optional[str], expected_language: Optional[str]) -> Optional[str]:
+    """Map a country/language hint to the Tesseract language pack to use for regional
+    scripts. Returns None for English/unspecified, so callers fall back to the default
+    PaddleOCR/English-Tesseract path in OCREngine.extract_text()."""
+    if expected_country and expected_country.upper() in COUNTRY_TO_LANG:
+        return COUNTRY_TO_LANG[expected_country.upper()][2]
+    if expected_language:
+        return f"eng+{expected_language}" if expected_language != "eng" else "eng"
+    return None
+
+
 @app.post("/api/v1/extract-only", tags=["Extraction"])
-async def extract_only(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def extract_only(
+    file: UploadFile = File(...),
+    expected_country: Optional[str] = Form(None),
+    expected_language: Optional[str] = Form(None),
+) -> Dict[str, Any]:
     """Step 1 Endpoint: Extract raw OCR text and parsed fields without running DB matching."""
     try:
         content = await file.read()
         ingested = ingest_file(content, file.filename or "")
         ocr_engine = OCREngine.get_instance()
-        ocr_res = ocr_engine.extract_text(ingested.images[0])
-        parsed = extract_document_fields(ocr_res)
+        ocr_lang = _resolve_ocr_lang(expected_country, expected_language)
+        ocr_res = ocr_engine.extract_text(ingested.images[0], lang=ocr_lang)
+        parsed = extract_document_fields(ocr_res, expected_country=expected_country, expected_language=expected_language)
 
         return {
             "doc_type": parsed.doc_type,
             "document_number": parsed.document_number,
             "claimed_name": parsed.claimed_name,
             "claimed_dob": parsed.claimed_dob,
+            "claimed_dob_bs": parsed.claimed_dob_bs,
+            "calendar_system": parsed.calendar_system,
+            "detected_language": parsed.detected_language,
+            "detected_script": parsed.detected_script,
             "claimed_expiry": parsed.claimed_expiry,
             "claimed_gender": parsed.claimed_gender,
             "issuing_country": parsed.issuing_country,
@@ -190,30 +219,22 @@ async def cross_verify_documents(files: List[UploadFile] = File(...)) -> Dict[st
     }
 
 
-@app.post("/api/v1/screen", response_model=ScreenResponse, tags=["Screening"])
-async def screen_document(
-    file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),
-    document_id: Optional[str] = Form(None),
-) -> ScreenResponse:
-    """Full Screening Pipeline: Ingestion -> OCR -> MRZ Verification -> DB Candidate Search -> Decision."""
-    s_id = session_id or str(uuid.uuid4())
-    d_id = document_id or str(uuid.uuid4())
+def _run_screening_pipeline(
+    content: bytes,
+    filename: str,
+    expected_country: Optional[str] = None,
+    expected_language: Optional[str] = None,
+):
+    """Steps 1-5 of the screening pipeline: ingest -> OCR -> field/MRZ extraction ->
+    watchlist/candidate search -> matching -> decision. Shared by /api/v1/screen (single
+    document, full response) and /screen (the frontend-facing multi-document contract)."""
+    ingested = ingest_file(content, filename or "")
 
-    try:
-        content = await file.read()
-        ingested = ingest_file(content, file.filename or "")
-    except Exception as err:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File ingestion error: {err}")
-
-    # 1. OCR Text Extraction
     ocr_engine = OCREngine.get_instance()
-    ocr_res = ocr_engine.extract_text(ingested.images[0])
+    ocr_lang = _resolve_ocr_lang(expected_country, expected_language)
+    ocr_res = ocr_engine.extract_text(ingested.images[0], lang=ocr_lang)
+    parsed = extract_document_fields(ocr_res, expected_country=expected_country, expected_language=expected_language)
 
-    # 2. Field Extraction & MRZ Verification
-    parsed = extract_document_fields(ocr_res)
-
-    # 3. Watchlist Screening & Candidate Document Search
     search_engine = CandidateSearchEngine()
     watchlist_hits = search_engine.screen_watchlist(
         document_number=parsed.document_number,
@@ -226,14 +247,34 @@ async def screen_document(
         dob=parsed.claimed_dob,
     )
     selected_candidate = candidates[0] if candidates else None
-
-    # 4. Strict & Fuzzy Matching
     match_outcome = match_against_candidate(parsed, selected_candidate)
-
-    # 5. Weighted Decision Matrix & Reason Codes
     decision = evaluate_decision_matrix(parsed, match_outcome, watchlist_hits)
+    return ingested, ocr_res, parsed, match_outcome, decision, watchlist_hits, selected_candidate
 
-    # 6. Database Persistence
+
+@app.post("/api/v1/screen", response_model=ScreenResponse, tags=["Screening"])
+async def screen_document(
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    document_id: Optional[str] = Form(None),
+    expected_country: Optional[str] = Form(None),
+    expected_language: Optional[str] = Form(None),
+) -> ScreenResponse:
+    """Full Screening Pipeline: Ingestion -> OCR -> MRZ Verification -> DB Candidate Search -> Decision."""
+    s_id = session_id or str(uuid.uuid4())
+    d_id = document_id or str(uuid.uuid4())
+
+    try:
+        content = await file.read()
+        ingested, ocr_res, parsed, match_outcome, decision, watchlist_hits, selected_candidate = _run_screening_pipeline(
+            content, file.filename or "", expected_country, expected_language
+        )
+    except HTTPException:
+        raise
+    except Exception as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File ingestion error: {err}")
+
+    # Database Persistence
     _persist_screening_session(s_id, d_id, ingested, ocr_res, parsed, decision, watchlist_hits)
 
     cand_dict = None
@@ -261,6 +302,10 @@ async def screen_document(
         claimed_expiry=parsed.claimed_expiry,
         claimed_gender=parsed.claimed_gender,
         issuing_country=parsed.issuing_country or "IND",
+        detected_language=parsed.detected_language,
+        detected_script=parsed.detected_script,
+        claimed_dob_bs=parsed.claimed_dob_bs,
+        calendar_system=parsed.calendar_system,
         reason_codes=[
             {"code": r.code, "message": r.message, "severity": r.severity, "contribution": r.contribution}
             for r in decision.reason_codes
@@ -329,9 +374,61 @@ def verify_text_only(req: VerifyTextRequest) -> Dict[str, Any]:
     }
 
 
-# Mount Multilingual & Regional Consistency Router
-from multilingual_service import router as multilingual_router
-app.include_router(multilingual_router)
+@app.post("/screen", tags=["Screening"])
+async def screen(
+    uuid: str = Form(...),
+    documents_present: str = Form(...),
+    passport: Optional[UploadFile] = File(None),
+    visa: Optional[UploadFile] = File(None),
+    nationalId: Optional[UploadFile] = File(None),
+    drivingLicence: Optional[UploadFile] = File(None),
+    permit: Optional[UploadFile] = File(None),
+    selfie: Optional[UploadFile] = File(None),
+) -> Dict[str, Any]:
+    """Frontend-facing contract endpoint (see ../../API_CONTRACT.md). Adapts the per-document
+    screening pipeline above to the shared {score, hard_fail, reason_codes} module response,
+    across every document present in one submission. selfie is excluded: it belongs to the
+    biometric-matching module, not OCR."""
+    try:
+        present: Dict[str, bool] = json.loads(documents_present)
+    except json.JSONDecodeError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "documents_present must be valid JSON")
+
+    documents = {"passport": passport, "visa": visa, "nationalId": nationalId, "drivingLicence": drivingLicence, "permit": permit}
+    uploaded: List[tuple] = []
+    for key, file in documents.items():
+        if present.get(key) and file is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"documents_present says '{key}' is present but no file was sent")
+        if file is not None:
+            uploaded.append((key, file))
+
+    if not uploaded:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No documents uploaded")
+
+    reason_codes: List[str] = []
+    scores: List[float] = []
+    hard_fail = False
+    parsed_docs: List[ParsedDocumentData] = []
+
+    for key, file in uploaded:
+        content = await file.read()
+        try:
+            _, _, parsed, _, decision, _, _ = _run_screening_pipeline(content, file.filename or key)
+        except Exception as err:
+            logger.error("Screening failed for %s: %s", key, err)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{key}: {err}")
+        parsed_docs.append(parsed)
+        scores.append(decision.score)
+        hard_fail = hard_fail or decision.hard_fail
+        reason_codes.extend(r.code for r in decision.reason_codes)
+
+    if len(parsed_docs) > 1:
+        cross = cross_check_documents(parsed_docs)
+        if not cross.consistent:
+            hard_fail = True
+            reason_codes.append("cross_document_mismatch")
+
+    return {"score": min(scores) if scores else 0, "hard_fail": hard_fail, "reason_codes": reason_codes}
 
 
 def _ensure_uuid(val: Optional[str]) -> str:
