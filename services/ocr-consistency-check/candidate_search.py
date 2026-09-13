@@ -57,7 +57,7 @@ class CandidateSearchEngine:
         sql = """
             SELECT record_id, doc_type, id_number, full_name, dob, gender, issue_date, expiry_date, issuing_country, status
             FROM ground_truth_records
-            WHERE UPPER(TRIM(doc_type)) = %s AND UPPER(TRIM(id_number)) = %s
+            WHERE UPPER(doc_type::text) = %s AND UPPER(TRIM(id_number)) = %s
             LIMIT 5;
         """
         rows = self.db.query(sql, (doc_type.upper(), clean_id))
@@ -67,7 +67,7 @@ class CandidateSearchEngine:
             sql_fallback = """
                 SELECT record_id, doc_type, id_number, full_name, dob, gender, issue_date, expiry_date, issuing_country, status
                 FROM ground_truth_records
-                WHERE UPPER(TRIM(doc_type)) = %s AND dob = %s
+                WHERE UPPER(doc_type::text) = %s AND dob = %s
                 LIMIT 5;
             """
             rows = self.db.query(sql_fallback, (doc_type.upper(), dob))
@@ -86,7 +86,6 @@ class CandidateSearchEngine:
                 issuing_country=str(r.get("issuing_country", "IND")),
                 status=str(r.get("status", "ACTIVE")),
             ))
-        logger.info("Candidate search for doc_type=%s, id_number=%s: %d result(s).", doc_type, id_number, len(candidates))
         return candidates
 
     def screen_watchlist(self, document_number: Optional[str], full_name: Optional[str], dob: Optional[str]) -> List[WatchlistHitResult]:
@@ -99,7 +98,7 @@ class CandidateSearchEngine:
             sql_doc = """
                 SELECT entry_id, kind, doc_number, reason, source
                 FROM watchlist_entries
-                WHERE active = 1 AND UPPER(TRIM(doc_number)) = %s;
+                WHERE active = TRUE AND UPPER(TRIM(doc_number)) = %s;
             """
             doc_rows = self.db.query(sql_doc, (clean_num,))
             for r in doc_rows:
@@ -119,7 +118,7 @@ class CandidateSearchEngine:
             sql_person = """
                 SELECT entry_id, kind, full_name, reason, source
                 FROM watchlist_entries
-                WHERE active = 1 AND UPPER(TRIM(full_name)) = %s AND dob = %s;
+                WHERE active = TRUE AND UPPER(TRIM(full_name)) = %s AND dob = %s;
             """
             person_rows = self.db.query(sql_person, (clean_name, dob))
             for r in person_rows:
@@ -133,9 +132,5 @@ class CandidateSearchEngine:
                     is_hard_fail=True,
                 ))
 
-        if hits:
-            logger.warning("Watchlist screening: %d hit(s) for doc_number=%s.", len(hits), document_number)
-        else:
-            logger.info("Watchlist screening: no hits for doc_number=%s.", document_number)
         return hits
 

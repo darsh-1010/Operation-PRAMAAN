@@ -8,12 +8,9 @@ integrity to detect document tampering or fraudulent alterations.
 
 from __future__ import annotations
 import datetime
-import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-
-logger = logging.getLogger("mrz_verifier")
 
 ICAO_WEIGHTS = [7, 3, 1]
 
@@ -93,12 +90,7 @@ class MRZCheckResult:
 def verify_check_digit(data: str, expected_char: str, label: str) -> Tuple[bool, Dict[str, Any]]:
     """Verify a check digit against expected character and return status dict."""
     calc = calculate_mrz_checksum(data)
-    clean_char = expected_char.upper()
-    if clean_char in ("O", "Q"):
-        clean_char = "0"
-    elif clean_char in ("I", "L"):
-        clean_char = "1"
-    observed = int(clean_char) if clean_char.isdigit() else -1
+    observed = int(expected_char) if expected_char.isdigit() else -1
     passed = (calc == observed)
     return passed, {
         "field": label,
@@ -159,11 +151,6 @@ def parse_td3_mrz(lines: List[str]) -> MRZCheckResult:
     checksums["composite"] = res_comp
     if not p_comp:
         failures.append(f"Composite MRZ checksum mismatch: calc {res_comp['calculated']} vs {comp_cd}")
-
-    if failures:
-        logger.warning("TD3 MRZ checksum failure(s): %s", "; ".join(failures))
-    else:
-        logger.info("TD3 MRZ verified: all checksums passed.")
 
     return MRZCheckResult(
         valid_format=True,
@@ -232,11 +219,6 @@ def parse_td1_mrz(lines: List[str]) -> MRZCheckResult:
     if not p_comp:
         failures.append(f"Composite MRZ checksum mismatch in TD1.")
 
-    if failures:
-        logger.warning("TD1 MRZ checksum failure(s): %s", "; ".join(failures))
-    else:
-        logger.info("TD1 MRZ verified: all checksums passed.")
-
     return MRZCheckResult(
         valid_format=True,
         format_type="TD1",
@@ -255,36 +237,75 @@ def parse_td1_mrz(lines: List[str]) -> MRZCheckResult:
     )
 
 
+def _normalize_td3_pair(l1_raw: str, l2_raw: str) -> Tuple[str, str]:
+    """Normalize OCR artifacts in candidate 2-line TD3 Passport MRZ."""
+    l1 = re.sub(r"[^A-Z0-9<]", "", l1_raw.upper().strip())
+    l2 = re.sub(r"[^A-Z0-9<]", "", l2_raw.upper().strip())
+
+    if len(l1) < 44:
+        l1 = l1 + "<" * (44 - len(l1))
+    elif len(l1) > 44:
+        l1 = l1[:44]
+
+    if len(l2) < 44:
+        l2 = l2 + "<" * (44 - len(l2))
+    elif len(l2) > 44:
+        l2 = l2[:44]
+
+    chars = list(l2)
+    digit_fix = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "T": "1", "Z": "2", "B": "8", "S": "5", "G": "6", "E": "6"}
+
+    # Fix check digit at index 9
+    if chars[9] in digit_fix:
+        chars[9] = digit_fix[chars[9]]
+
+    # Fix DOB at 13..19 and check digit at 19
+    for i in range(13, 20):
+        if chars[i] in digit_fix:
+            chars[i] = digit_fix[chars[i]]
+
+    # Fix Expiry at 21..27 and check digit at 27
+    for i in range(21, 28):
+        if chars[i] in digit_fix:
+            chars[i] = digit_fix[chars[i]]
+
+    # In filler zone (28..43), replace common misread filler chars with <
+    for i in range(28, 43):
+        if chars[i] in ("K", "X", "C", "E", "F"):
+            chars[i] = "<"
+
+    # Fix composite check digit at index 43
+    if chars[43] in digit_fix:
+        chars[43] = digit_fix[chars[43]]
+
+    return l1, "".join(chars)
+
+
 def extract_and_verify_mrz(text_lines: List[str]) -> Optional[MRZCheckResult]:
     """Identify, clean, and verify MRZ lines from a list of OCR extracted text lines."""
-    # Find lines containing typical MRZ filler chars or matching standard lengths
     cleaned = [clean_mrz_line(line) for line in text_lines]
     candidate_lines = [l for l in cleaned if len(l) in (44, 30) or "<" in l]
 
-    # Look for 2 consecutive 44-char lines (TD3)
+    # Pass 1: Look for exact 2 consecutive 44-char lines (TD3)
     for i in range(len(candidate_lines) - 1):
         l1, l2 = candidate_lines[i], candidate_lines[i + 1]
-        if l1.startswith("P") or l1.startswith("V"):
-            if 42 <= len(l1) <= 46:
-                l1 = l1[:44].ljust(44, "<")
-            if 42 <= len(l2) <= 46:
-                l2 = l2[:44].ljust(44, "<")
-            if len(l1) == 44 and len(l2) == 44:
-                return parse_td3_mrz([l1, l2])
+        if len(l1) == 44 and len(l2) == 44 and (l1.startswith("P") or l1.startswith("V")):
+            return parse_td3_mrz([l1, l2])
 
-    # Look for 3 consecutive 30-char lines (TD1)
+    # Pass 2: Look for candidate TD3 lines that require length/OCR normalization
+    for i in range(len(candidate_lines) - 1):
+        l1, l2 = candidate_lines[i], candidate_lines[i + 1]
+        if (l1.startswith("P<") or l1.startswith("V<")) and 35 <= len(l1) <= 50 and 35 <= len(l2) <= 50:
+            norm_l1, norm_l2 = _normalize_td3_pair(l1, l2)
+            res = parse_td3_mrz([norm_l1, norm_l2])
+            if res.valid_format and (not res.has_checksum_failure or len(res.failure_details) <= 1):
+                return res
+
+    # Pass 3: Look for 3 consecutive 30-char lines (TD1)
     for i in range(len(candidate_lines) - 2):
         l1, l2, l3 = candidate_lines[i], candidate_lines[i + 1], candidate_lines[i + 2]
-        if l1.startswith("I") or l1.startswith("A"):
-            if 28 <= len(l1) <= 32:
-                l1 = l1[:30].ljust(30, "<")
-            if 28 <= len(l2) <= 32:
-                l2 = l2[:30].ljust(30, "<")
-            if 28 <= len(l3) <= 32:
-                l3 = l3[:30].ljust(30, "<")
-            if len(l1) == 30 and len(l2) == 30 and len(l3) == 30:
-                return parse_td1_mrz([l1, l2, l3])
+        if len(l1) == 30 and len(l2) == 30 and len(l3) == 30 and (l1.startswith("I") or l1.startswith("A")):
+            return parse_td1_mrz([l1, l2, l3])
 
-    logger.info("No MRZ block detected in OCR text (%d candidate lines).", len(candidate_lines))
     return None
 
