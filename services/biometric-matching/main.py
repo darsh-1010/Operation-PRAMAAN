@@ -17,8 +17,10 @@ Pipeline status (2026-09-09):
 import io
 import json
 import logging
+import os
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
@@ -27,7 +29,26 @@ from app.config import BiometricConfig, load_config
 from app.domain.enums import ReasonCode
 from app.ml.preprocessing import detect_and_align, image_bytes_to_rgb
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
+
+
+async def _notify_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str]) -> None:
+    """Push this module's score to risk-scoring-engine as the "photo" module (see
+    ../../services/risk-scoring-engine/README.md) — photo-match only ever calls /submit-score,
+    never /flag-check; its hard_fail travels inside the score payload instead. Best-effort:
+    the risk engine being down must never break this service's own /screen response."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            await client.post(
+                f"{RISK_ENGINE_URL}/submit-score",
+                json={"uuid": uuid, "module": "photo", "photo": {"score": score, "hard_fail": hard_fail, "reasons": reasons}},
+            )
+            logger.info("uuid=%s pushed to risk-scoring-engine (score=%s, hard_fail=%s)", uuid, score, hard_fail)
+        except httpx.HTTPError as exc:
+            logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", uuid, exc)
 
 app = FastAPI(title="biometric-matching")
 # Dev CORS: the frontend calls this port directly from the browser. Restrict allow_origins
@@ -157,6 +178,8 @@ async def screen(
     if selfie is not None:
         selfie_data = await selfie.read()
         validate_selfie(selfie_data)
+
+    logger.info("uuid=%s /screen received: docs=%s selfie=%s", uuid, list(doc_data.keys()), selfie_data is not None)
 
     # --- Face pipeline ---
     reason_codes: list[str] = []
@@ -293,4 +316,6 @@ async def screen(
         else:
             reason_codes.append("no_face_matching_performed")
 
+    logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, api_score, hard_fail, reason_codes)
+    await _notify_risk_engine(uuid, api_score, hard_fail, reason_codes)
     return {"score": api_score, "hard_fail": hard_fail, "reason_codes": reason_codes}

@@ -14,6 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -31,6 +32,25 @@ from script_detector import COUNTRY_TO_LANG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ocr_service")
+
+RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
+
+
+async def _notify_risk_engine(session_id: str, hard_fail: bool, score: float, reasons: List[str]) -> None:
+    """Push this module's flag + score to risk-scoring-engine (see
+    ../../services/risk-scoring-engine/README.md for the two-stage contract). Best-effort:
+    the risk engine being down must never break this service's own /screen response to the
+    frontend, so failures are logged and swallowed rather than raised."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            await client.post(f"{RISK_ENGINE_URL}/flag-check", json={"uuid": session_id, "module": "ocr", "flag": hard_fail})
+            await client.post(
+                f"{RISK_ENGINE_URL}/submit-score",
+                json={"uuid": session_id, "module": "ocr", "ocr": {"score": score, "reasons": reasons}},
+            )
+            logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, score=%s)", session_id, hard_fail, score)
+        except httpx.HTTPError as exc:
+            logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", session_id, exc)
 
 
 @asynccontextmanager
@@ -400,6 +420,8 @@ async def screen(
     if not uploaded:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No documents uploaded")
 
+    logger.info("uuid=%s /screen received: docs=%s", uuid, [k for k, _ in uploaded])
+
     reason_codes: List[str] = []
     scores: List[float] = []
     hard_fail = False
@@ -423,7 +445,10 @@ async def screen(
             hard_fail = True
             reason_codes.append("cross_document_mismatch")
 
-    return {"score": min(scores) if scores else 0, "hard_fail": hard_fail, "reason_codes": reason_codes}
+    final_score = min(scores) if scores else 0
+    logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, final_score, hard_fail, reason_codes)
+    await _notify_risk_engine(uuid, hard_fail, final_score, reason_codes)
+    return {"score": final_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
 
 
 def _persist_screening_session(

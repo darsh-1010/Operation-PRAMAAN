@@ -29,10 +29,11 @@ separate HTTP calls, in whatever order:
     crashed module obviously won't be the one to come collect it.
 
 Run locally:
-    uvicorn main:app --reload --port 8000
+    uvicorn main:app --reload --port 8004
 """
 
 import asyncio
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -44,6 +45,9 @@ from pydantic import BaseModel, Field
 
 import store
 from scoring import band_for, tamper_reasons_for, weighted_score
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("risk_engine")
 
 SWEEP_INTERVAL_SECONDS = 30
 OCR_CALLBACK_URL = os.environ.get("OCR_CALLBACK_URL", "").strip()
@@ -67,7 +71,7 @@ def _notify_ocr(uuid: str, score, decision: str) -> None:
     except requests.RequestException as exc:
         # Don't let a failed push break anything - the result is already
         # saved and pollable via /result/{uuid} regardless.
-        print(f"[risk-engine] uuid={uuid} WARNING: OCR callback failed: {exc}")
+        logger.warning("uuid=%s OCR callback failed: %s", uuid, exc)
 
 
 def _missing_pieces(entry: dict) -> list:
@@ -111,9 +115,9 @@ def _try_finalize(uuid: str) -> Optional[dict]:
 
     # Explainability: printed/logged for audit purposes only - these
     # reasons are NOT part of the payload sent back for the DB update.
-    print(f"[risk-engine] uuid={uuid} score={final_score} decision={decision}")
+    logger.info("uuid=%s score=%s decision=%s", uuid, final_score, decision)
     for reason in entry["reasons"]:
-        print(f"[risk-engine]   - {reason}")
+        logger.info("  - %s", reason)
 
     store.save_result(uuid, final_score, decision)
     store.clear(uuid)
@@ -142,13 +146,10 @@ async def _timeout_sweeper():
                 continue  # about to finalize normally, leave it alone
 
             missing = _missing_pieces(entry)
-            print(
-                f"[risk-engine] uuid={uuid} TIMEOUT after {age:.0f}s "
-                f"- auto-escalating to MANUAL_REVIEW"
-            )
-            print(f"[risk-engine]   - TIMEOUT_ESCALATION: missing={missing}")
+            logger.info("uuid=%s TIMEOUT after %.0fs - auto-escalating to MANUAL_REVIEW", uuid, age)
+            logger.info("  - TIMEOUT_ESCALATION: missing=%s", missing)
             for reason in entry["reasons"]:
-                print(f"[risk-engine]   - {reason}")
+                logger.info("  - %s", reason)
 
             # No numeric score is computable with pieces missing - score
             # is left as null so downstream can't mistake this for an
@@ -187,14 +188,15 @@ class FlagCheckResponse(BaseModel):
 
 @app.post("/flag-check", response_model=FlagCheckResponse)
 def flag_check(payload: FlagCheckRequest) -> FlagCheckResponse:
+    logger.info("uuid=%s /flag-check received: module=%s flag=%s", payload.uuid, payload.module, payload.flag)
     if payload.flag:
         # One true flag is enough - reject now, don't wait for the other.
         # TODO: this is also where a "stop other modules" signal should
         # go out, once the other services expose an endpoint for it.
         store.update(payload.uuid, rejected=True)
         reason = f"{payload.module}_flag: TRUE"
-        print(f"[risk-engine] uuid={payload.uuid} score=0 decision=REJECTED")
-        print(f"[risk-engine]   - {reason}")
+        logger.info("uuid=%s score=0 decision=REJECTED", payload.uuid)
+        logger.info("  - %s", reason)
         store.save_result(payload.uuid, 0, "REJECTED")
         store.clear(payload.uuid)
         _notify_ocr(payload.uuid, 0, "REJECTED")
@@ -253,6 +255,7 @@ class SubmitScoreResponse(BaseModel):
 
 @app.post("/submit-score", response_model=SubmitScoreResponse)
 def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
+    logger.info("uuid=%s /submit-score received: module=%s", payload.uuid, payload.module)
     entry = store.get(payload.uuid)
 
     if entry["rejected"]:
@@ -277,9 +280,9 @@ def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
             store.update(payload.uuid, rejected=True)
             store.add_reasons(payload.uuid, payload.photo.reasons)
             entry = store.get(payload.uuid)
-            print(f"[risk-engine] uuid={payload.uuid} score=0 decision=REJECTED")
+            logger.info("uuid=%s score=0 decision=REJECTED", payload.uuid)
             for reason in entry["reasons"]:
-                print(f"[risk-engine]   - {reason}")
+                logger.info("  - %s", reason)
             store.save_result(payload.uuid, 0, "REJECTED")
             store.clear(payload.uuid)
             _notify_ocr(payload.uuid, 0, "REJECTED")

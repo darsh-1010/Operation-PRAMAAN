@@ -6,9 +6,10 @@ accept the same request shape and return the same response shape. This is that s
 exactly as written here; `risk-scoring-engine` is the one service that instead *consumes* 3 of
 these responses (see bottom).
 
-Enforced today only on the frontend side, in
-[frontend/src/lib/submitScreening.ts](frontend/src/lib/submitScreening.ts) — no service has an
-implementation yet.
+Enforced on the frontend side in
+[frontend/src/lib/submitScreening.ts](frontend/src/lib/submitScreening.ts). Implemented today by
+`ocr-consistency-check` and `biometric-matching`; `visual-image-forensics` still returns a stub
+result (see its `main.py` TODO).
 
 ## `POST /screen`
 
