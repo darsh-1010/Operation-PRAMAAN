@@ -25,9 +25,9 @@ liveness:
   hard_fail_threshold: 0.20    # below this → HARD FAIL
 
 doc_to_selfie:
-  accept_threshold: 0.60       # above this → PASS
-  review_threshold: 0.45       # above this → REVIEW, below → FAIL
-  hard_fail_threshold: 0.30    # below this → HARD FAIL (high quality only)
+  accept_threshold: 0.55       # lowered from 0.60 for age gaps
+  review_threshold: 0.40       # lowered from 0.45
+  hard_fail_threshold: 0.25    # lowered from 0.30
 
 cross_document:
   accept_threshold: 0.60
