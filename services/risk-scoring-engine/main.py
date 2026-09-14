@@ -41,6 +41,7 @@ from typing import List, Literal, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import store
@@ -167,6 +168,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Praman Risk Scoring Engine", lifespan=lifespan)
+# Dev CORS: the frontend polls GET /result/{uuid} directly from the browser (see
+# frontend/src/lib/riskEngine.ts). Restrict allow_origins to the real frontend origin before
+# this ever leaves a local dev machine — same pattern as the other 3 services.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
 
 
 # ---------------------------------------------------------------------

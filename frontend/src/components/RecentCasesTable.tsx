@@ -33,7 +33,7 @@ export default function RecentCasesTable({ rows, onSelect }: { rows: UserRow[]; 
           <tbody>
             {rows.map(({ case: c, screeningCount }) => (
               <tr
-                key={c.subjectName}
+                key={c.id}
                 onClick={() => onSelect(c)}
                 className="border-b border-border last:border-0 cursor-pointer hover:bg-surface-2 transition-colors"
               >
