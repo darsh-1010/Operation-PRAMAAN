@@ -6,3 +6,4 @@ pydantic
 scikit-learn
 lightgbm
 numpy
+requests>=2.31
