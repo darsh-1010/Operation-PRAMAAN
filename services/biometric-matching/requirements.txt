@@ -9,4 +9,8 @@ numpy
 pillow
 torch
 torchvision
-face-recognition
+deepface
+tf-keras
+
+# configuration
+pyyaml
