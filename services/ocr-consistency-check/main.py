@@ -44,7 +44,13 @@ async def _notify_risk_engine(session_id: str, hard_fail: bool, score: float, re
     frontend, so failures are logged and swallowed rather than raised."""
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
-            await client.post(f"{RISK_ENGINE_URL}/flag-check", json={"uuid": session_id, "module": "ocr", "flag": hard_fail})
+            await client.post(
+                f"{RISK_ENGINE_URL}/flag-check",
+                json={"uuid": session_id, "module": "ocr", "flag": hard_fail, "reasons": reasons},
+            )
+            # If that flag was true, the risk engine already rejected and cleared this uuid —
+            # this second call still fires (simpler than branching), but lands on the
+            # already-finalized guard on the other end rather than a live wait.
             await client.post(
                 f"{RISK_ENGINE_URL}/submit-score",
                 json={"uuid": session_id, "module": "ocr", "ocr": {"score": score, "reasons": reasons}},

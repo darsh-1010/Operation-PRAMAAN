@@ -19,6 +19,8 @@ otherwise different requests for the same uuid could land on different
 instances and never see each other's data.
 """
 
+from __future__ import annotations
+
 import os
 import time
 from threading import Lock
@@ -75,13 +77,14 @@ def all_entries() -> dict:
         return {u: dict(e) for u, e in _store.items()}
 
 
-def save_result(uuid: str, score, decision: str, timed_out: bool = False) -> None:
+def save_result(uuid: str, score, decision: str, timed_out: bool = False, reasons: list | None = None) -> None:
     with _lock:
         _results[uuid] = {
             "uuid": uuid,
             "score": score,
             "decision": decision,
             "timed_out": timed_out,
+            "reasons": list(reasons) if reasons else [],
             "finalized_at": time.time(),
         }
 

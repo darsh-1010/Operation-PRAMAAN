@@ -36,6 +36,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid as _uuid
 from contextlib import asynccontextmanager
 from typing import List, Literal, Optional
 
@@ -45,6 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import store
+from db import RiskResultDB
 from scoring import band_for, tamper_reasons_for, weighted_score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -52,6 +54,14 @@ logger = logging.getLogger("risk_engine")
 
 SWEEP_INTERVAL_SECONDS = 30
 OCR_CALLBACK_URL = os.environ.get("OCR_CALLBACK_URL", "").strip()
+
+_db = RiskResultDB.get_instance()
+
+
+def _persist(uuid: str, score, decision: str, reasons: list, timed_out: bool = False) -> None:
+    """Durable copy of every finalized decision — normal, hard-fail reject, or timeout —
+    alongside store.py's in-memory one (see db.py for why both exist)."""
+    _db.save_risk_result(str(_uuid.uuid4()), uuid, score, decision, decision == "REJECTED", timed_out, reasons)
 
 
 def _notify_ocr(uuid: str, score, decision: str) -> None:
@@ -114,13 +124,14 @@ def _try_finalize(uuid: str) -> Optional[dict]:
     )
     decision = band_for(final_score)
 
-    # Explainability: printed/logged for audit purposes only - these
-    # reasons are NOT part of the payload sent back for the DB update.
+    # Explainability: logged, persisted (see _persist), and returned via GET /result — but
+    # NOT part of the {uuid, score, decision} payload pushed to OCR_CALLBACK_URL.
     logger.info("uuid=%s score=%s decision=%s", uuid, final_score, decision)
     for reason in entry["reasons"]:
         logger.info("  - %s", reason)
 
-    store.save_result(uuid, final_score, decision)
+    store.save_result(uuid, final_score, decision, reasons=entry["reasons"])
+    _persist(uuid, final_score, decision, entry["reasons"])
     store.clear(uuid)
     _notify_ocr(uuid, final_score, decision)
     return {"uuid": uuid, "score": final_score, "decision": decision}
@@ -152,10 +163,13 @@ async def _timeout_sweeper():
             for reason in entry["reasons"]:
                 logger.info("  - %s", reason)
 
+            timeout_reasons = entry["reasons"] + [f"TIMEOUT_ESCALATION: missing={missing}"]
+
             # No numeric score is computable with pieces missing - score
             # is left as null so downstream can't mistake this for an
             # actual (e.g. 0/FAIL) result. Decision is what matters here.
-            store.save_result(uuid, None, "MANUAL_REVIEW", timed_out=True)
+            store.save_result(uuid, None, "MANUAL_REVIEW", timed_out=True, reasons=timeout_reasons)
+            _persist(uuid, None, "MANUAL_REVIEW", timeout_reasons, timed_out=True)
             store.clear(uuid)
             _notify_ocr(uuid, None, "MANUAL_REVIEW")
 
@@ -182,6 +196,7 @@ class FlagCheckRequest(BaseModel):
     uuid: str
     module: Literal["ocr", "forensics"]
     flag: bool
+    reasons: List[str] = Field(default_factory=list)
 
 
 class FlagCheckResponse(BaseModel):
@@ -194,15 +209,26 @@ class FlagCheckResponse(BaseModel):
 @app.post("/flag-check", response_model=FlagCheckResponse)
 def flag_check(payload: FlagCheckRequest) -> FlagCheckResponse:
     logger.info("uuid=%s /flag-check received: module=%s flag=%s", payload.uuid, payload.module, payload.flag)
+
+    # This uuid was already finalized (a prior reject, or a normal/timeout completion) and
+    # its pending entry cleared — a late or duplicate call must not resurrect a fresh, never-
+    # to-be-finalized phantom entry via store.get()'s auto-create. Just echo what's already decided.
+    existing = store.get_result(payload.uuid)
+    if existing is not None:
+        return FlagCheckResponse(uuid=payload.uuid, status="DONE", score=existing["score"], decision=existing["decision"])
+
     if payload.flag:
         # One true flag is enough - reject now, don't wait for the other.
         # TODO: this is also where a "stop other modules" signal should
         # go out, once the other services expose an endpoint for it.
         store.update(payload.uuid, rejected=True)
-        reason = f"{payload.module}_flag: TRUE"
+        store.add_reasons(payload.uuid, payload.reasons or [f"{payload.module}_flag: TRUE"])
+        entry = store.get(payload.uuid)
         logger.info("uuid=%s score=0 decision=REJECTED", payload.uuid)
-        logger.info("  - %s", reason)
-        store.save_result(payload.uuid, 0, "REJECTED")
+        for reason in entry["reasons"]:
+            logger.info("  - %s", reason)
+        store.save_result(payload.uuid, 0, "REJECTED", reasons=entry["reasons"])
+        _persist(payload.uuid, 0, "REJECTED", entry["reasons"])
         store.clear(payload.uuid)
         _notify_ocr(payload.uuid, 0, "REJECTED")
         return FlagCheckResponse(
@@ -261,6 +287,12 @@ class SubmitScoreResponse(BaseModel):
 @app.post("/submit-score", response_model=SubmitScoreResponse)
 def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
     logger.info("uuid=%s /submit-score received: module=%s", payload.uuid, payload.module)
+
+    # Same late/duplicate-arrival guard as /flag-check — see the comment there.
+    existing = store.get_result(payload.uuid)
+    if existing is not None:
+        return SubmitScoreResponse(uuid=payload.uuid, status="DONE", score=existing["score"], decision=existing["decision"])
+
     entry = store.get(payload.uuid)
 
     if entry["rejected"]:
@@ -288,7 +320,8 @@ def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
             logger.info("uuid=%s score=0 decision=REJECTED", payload.uuid)
             for reason in entry["reasons"]:
                 logger.info("  - %s", reason)
-            store.save_result(payload.uuid, 0, "REJECTED")
+            store.save_result(payload.uuid, 0, "REJECTED", reasons=entry["reasons"])
+            _persist(payload.uuid, 0, "REJECTED", entry["reasons"])
             store.clear(payload.uuid)
             _notify_ocr(payload.uuid, 0, "REJECTED")
             return SubmitScoreResponse(
@@ -316,6 +349,7 @@ class ResultResponse(BaseModel):
     score: Optional[float]
     decision: str
     timed_out: bool
+    reasons: List[str] = Field(default_factory=list)
 
 
 @app.get("/result/{uuid}", response_model=ResultResponse)

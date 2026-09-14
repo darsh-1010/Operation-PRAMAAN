@@ -1,8 +1,8 @@
 services:
-  # Shared by ocr-consistency-check and biometric-matching only — the two services that
-  # persist screening results. Each owns its own tables (self-provisioned on connect, see
-  # each service's db.py) rather than a shared schema file, so this is one instance, not
-  # one shared schema.
+  # Shared by ocr-consistency-check, biometric-matching, and risk-scoring-engine — the 3
+  # services that persist their own results. Each owns its own tables (self-provisioned on
+  # connect, see each service's db.py) rather than a shared schema file, so this is one
+  # instance, not one shared schema.
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -40,9 +40,12 @@ services:
       - ./services/ocr-consistency-check/.env
     environment:
       - POSTGRES_HOST=postgres
+      - RISK_ENGINE_URL=http://risk-scoring-engine:8004
     depends_on:
       postgres:
         condition: service_healthy
+      risk-scoring-engine:
+        condition: service_started
 
   visual-image-forensics:
     build: ./services/visual-image-forensics
@@ -50,6 +53,10 @@ services:
       - "8002:8002"
     env_file:
       - ./services/visual-image-forensics/.env
+    environment:
+      - RISK_ENGINE_URL=http://risk-scoring-engine:8004
+    depends_on:
+      - risk-scoring-engine
 
   biometric-matching:
     build: ./services/biometric-matching
@@ -59,9 +66,12 @@ services:
       - ./services/biometric-matching/.env
     environment:
       - POSTGRES_HOST=postgres
+      - RISK_ENGINE_URL=http://risk-scoring-engine:8004
     depends_on:
       postgres:
         condition: service_healthy
+      risk-scoring-engine:
+        condition: service_started
 
   risk-scoring-engine:
     build: ./services/risk-scoring-engine
@@ -69,6 +79,11 @@ services:
       - "8004:8004"
     env_file:
       - ./services/risk-scoring-engine/.env
+    environment:
+      - POSTGRES_HOST=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pramaan-postgres-data:
