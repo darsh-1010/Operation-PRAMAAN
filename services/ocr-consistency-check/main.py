@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import uuid
+import uuid as py_uuid  # alias for use inside /screen, whose own `uuid` param shadows the module
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -430,7 +431,7 @@ async def screen(
     for key, file in uploaded:
         content = await file.read()
         try:
-            _, _, parsed, _, decision, _, _ = _run_screening_pipeline(content, file.filename or key)
+            ingested, ocr_res, parsed, _, decision, watchlist_hits, _ = _run_screening_pipeline(content, file.filename or key)
         except Exception as err:
             logger.error("Screening failed for %s: %s", key, err)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{key}: {err}")
@@ -438,6 +439,9 @@ async def screen(
         scores.append(decision.score)
         hard_fail = hard_fail or decision.hard_fail
         reason_codes.extend(r.code for r in decision.reason_codes)
+        # session_id = the frontend's submission uuid (shared across all documents in this
+        # call); document_id is per-document since each upload is its own audit row.
+        _persist_screening_session(uuid, str(py_uuid.uuid4()), ingested, ocr_res, parsed, decision, watchlist_hits)
 
     if len(parsed_docs) > 1:
         cross = cross_check_documents(parsed_docs)

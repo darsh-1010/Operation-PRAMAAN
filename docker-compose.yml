@@ -1,4 +1,25 @@
 services:
+  # Shared by ocr-consistency-check and biometric-matching only — the two services that
+  # persist screening results. Each owns its own tables (self-provisioned on connect, see
+  # each service's db.py) rather than a shared schema file, so this is one instance, not
+  # one shared schema.
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - pramaan-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   frontend:
     build: ./frontend
     ports:
@@ -17,6 +38,11 @@ services:
       - "8001:8001"
     env_file:
       - ./services/ocr-consistency-check/.env
+    environment:
+      - POSTGRES_HOST=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   visual-image-forensics:
     build: ./services/visual-image-forensics
@@ -31,6 +57,11 @@ services:
       - "8003:8003"
     env_file:
       - ./services/biometric-matching/.env
+    environment:
+      - POSTGRES_HOST=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   risk-scoring-engine:
     build: ./services/risk-scoring-engine
@@ -38,3 +69,6 @@ services:
       - "8004:8004"
     env_file:
       - ./services/risk-scoring-engine/.env
+
+volumes:
+  pramaan-postgres-data:

@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import uuid as py_uuid
 from typing import Optional
 
 import httpx
@@ -26,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
 from app.config import BiometricConfig, load_config
+from app.db import BiometricDB
 from app.domain.enums import ReasonCode
 from app.ml.preprocessing import detect_and_align, image_bytes_to_rgb
 
@@ -58,8 +60,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["POST"], 
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
 
-# Load configuration once at startup.
+# Load configuration and DB connection once at startup.
 _config: BiometricConfig = load_config()
+_db = BiometricDB.get_instance()
 
 
 def validate_image(data: bytes, field: str) -> None:
@@ -317,5 +320,9 @@ async def screen(
             reason_codes.append("no_face_matching_performed")
 
     logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, api_score, hard_fail, reason_codes)
+
+    documents_checked = list(doc_data.keys()) + (["selfie"] if selfie_data is not None else [])
+    _db.save_result(str(py_uuid.uuid4()), uuid, api_score, hard_fail, reason_codes, documents_checked)
+
     await _notify_risk_engine(uuid, api_score, hard_fail, reason_codes)
     return {"score": api_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
