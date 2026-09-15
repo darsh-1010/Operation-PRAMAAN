@@ -11,9 +11,16 @@ import os
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from aiobreaker import CircuitBreakerError
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+from rate_limit import SCREEN_RATE_LIMIT, limiter
+from risk_engine_breaker import RISK_ENGINE_BREAKER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -22,6 +29,12 @@ app = FastAPI(title="visual-image-forensics")
 # Dev CORS: the frontend calls this port directly from the browser. Restrict allow_origins
 # to the real frontend origin before this ever leaves a local dev machine.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["POST"], allow_headers=["*"])
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus.
+Instrumentator().instrument(app).expose(app)
 
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
@@ -41,28 +54,39 @@ def validate_image(data: bytes, field: str) -> None:
         raise HTTPException(400, f"{field}: not a decodable image")
 
 
+@RISK_ENGINE_BREAKER
+async def _push_to_risk_engine(uuid: str, hard_fail: bool, tamper_score: float, reasons: list[str]) -> None:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        await client.post(
+            f"{RISK_ENGINE_URL}/flag-check",
+            json={"uuid": uuid, "module": "forensics", "flag": hard_fail, "reasons": reasons},
+        )
+        await client.post(
+            f"{RISK_ENGINE_URL}/submit-score",
+            json={"uuid": uuid, "module": "tamper", "tamper": {"score": tamper_score}},
+        )
+    logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, tamper_score=%s)", uuid, hard_fail, tamper_score)
+
+
 async def _notify_risk_engine(uuid: str, hard_fail: bool, tamper_score: float, reasons: list[str]) -> None:
     """Push this module's flag + tamper score to risk-scoring-engine (see
     ../../services/risk-scoring-engine/README.md for the two-stage contract) — the "forensics"
     flag and the "tamper" score are the two pieces only this module ever sends. Best-effort:
-    the risk engine being down must never break this service's own /screen response."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            await client.post(
-                f"{RISK_ENGINE_URL}/flag-check",
-                json={"uuid": uuid, "module": "forensics", "flag": hard_fail, "reasons": reasons},
-            )
-            await client.post(
-                f"{RISK_ENGINE_URL}/submit-score",
-                json={"uuid": uuid, "module": "tamper", "tamper": {"score": tamper_score}},
-            )
-            logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, tamper_score=%s)", uuid, hard_fail, tamper_score)
-        except httpx.HTTPError as exc:
-            logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", uuid, exc)
+    the risk engine being down must never break this service's own /screen response.
+    Circuit-breaker-backed (see risk_engine_breaker.py) so a down risk-scoring-engine fails
+    fast instead of costing a full httpx timeout on every single request."""
+    try:
+        await _push_to_risk_engine(uuid, hard_fail, tamper_score, reasons)
+    except CircuitBreakerError:
+        logger.warning("uuid=%s risk-scoring-engine circuit open, skipping push", uuid)
+    except httpx.HTTPError as exc:
+        logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", uuid, exc)
 
 
 @app.post("/screen")
+@limiter.limit(SCREEN_RATE_LIMIT)
 async def screen(
+    request: Request,
     uuid: str = Form(...),
     documents_present: str = Form(...),
     passport: Optional[UploadFile] = File(None),

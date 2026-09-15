@@ -43,6 +43,7 @@ from typing import List, Literal, Optional
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 import store
@@ -186,6 +187,9 @@ app = FastAPI(title="Praman Risk Scoring Engine", lifespan=lifespan)
 # frontend/src/lib/riskEngine.ts). Restrict allow_origins to the real frontend origin before
 # this ever leaves a local dev machine — same pattern as the other 3 services.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+
+# Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus.
+Instrumentator().instrument(app).expose(app)
 
 
 # ---------------------------------------------------------------------

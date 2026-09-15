@@ -13,3 +13,6 @@ requests>=2.31
 # testing
 pytest>=8.0.0
 httpx>=0.27.0
+
+# Prometheus metrics (/metrics endpoint)
+prometheus-fastapi-instrumentator>=7.0.0

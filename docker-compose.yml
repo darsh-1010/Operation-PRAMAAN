@@ -21,9 +21,10 @@ services:
       retries: 10
 
   # Shared by ocr-consistency-check, biometric-matching (result caches, keyed by uploaded-
-  # file content hash) and risk-scoring-engine (cross-instance pending/result coordination,
-  # see that service's store.py). One instance, several key namespaces — same reasoning as
-  # the single postgres instance above.
+  # file content hash), risk-scoring-engine (cross-instance pending/result coordination, see
+  # that service's store.py), and all 3 detection modules' /screen rate limiter (see each
+  # service's rate_limit.py). One instance, several key namespaces — same reasoning as the
+  # single postgres instance above.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -75,9 +76,13 @@ services:
     env_file:
       - ./services/visual-image-forensics/.env
     environment:
+      - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004
     depends_on:
-      - risk-scoring-engine
+      redis:
+        condition: service_healthy
+      risk-scoring-engine:
+        condition: service_started
 
   biometric-matching:
     build: ./services/biometric-matching
@@ -112,5 +117,32 @@ services:
       redis:
         condition: service_healthy
 
+  # Scrapes /metrics from all 4 backend services every 15s (see monitoring/prometheus.yml).
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - pramaan-prometheus-data:/prometheus
+
+  # Dashboards over Prometheus — datasource auto-provisioned (monitoring/grafana/
+  # provisioning/), login admin/admin on first visit to http://localhost:3001.
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - pramaan-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   pramaan-postgres-data:
+  pramaan-prometheus-data:
+  pramaan-grafana-data:

@@ -11,5 +11,14 @@ pillow
 torch
 torchvision
 
+# Circuit breaker for the risk-scoring-engine push (see risk_engine_breaker.py)
+aiobreaker>=1.2.0
+
+# Rate limiting for the public /screen endpoint (see rate_limit.py)
+slowapi>=0.1.9
+
 # testing
 pytest>=8.0.0
+
+# Prometheus metrics (/metrics endpoint)
+prometheus-fastapi-instrumentator>=7.0.0

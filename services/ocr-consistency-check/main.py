@@ -17,21 +17,28 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from aiobreaker import CircuitBreakerError
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from candidate_search import CandidateSearchEngine
 from cross_document import cross_check_documents
 from db import DatabaseManager
 from decision_matrix import DecisionOutcome, evaluate_decision_matrix
 from field_extractor import ParsedDocumentData, extract_document_fields
+from inference_pool import InferenceCrashed, run_isolated
 from ingestion import IngestedDocument, ingest_file
 from matcher import MatchOutcome, match_against_candidate
 from multilingual_service import router as multilingual_router
 from ocr_engine import OCREngine
+from rate_limit import SCREEN_RATE_LIMIT, limiter
 from result_cache import ResultCache
+from risk_engine_breaker import RISK_ENGINE_BREAKER
 from script_detector import COUNTRY_TO_LANG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -41,27 +48,36 @@ RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rst
 _cache = ResultCache(namespace="ocr")
 
 
+@RISK_ENGINE_BREAKER
+async def _push_to_risk_engine(session_id: str, hard_fail: bool, score: float, reasons: List[str]) -> None:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        await client.post(
+            f"{RISK_ENGINE_URL}/flag-check",
+            json={"uuid": session_id, "module": "ocr", "flag": hard_fail, "reasons": reasons},
+        )
+        # If that flag was true, the risk engine already rejected and cleared this uuid —
+        # this second call still fires (simpler than branching), but lands on the
+        # already-finalized guard on the other end rather than a live wait.
+        await client.post(
+            f"{RISK_ENGINE_URL}/submit-score",
+            json={"uuid": session_id, "module": "ocr", "ocr": {"score": score, "reasons": reasons}},
+        )
+    logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, score=%s)", session_id, hard_fail, score)
+
+
 async def _notify_risk_engine(session_id: str, hard_fail: bool, score: float, reasons: List[str]) -> None:
     """Push this module's flag + score to risk-scoring-engine (see
     ../../services/risk-scoring-engine/README.md for the two-stage contract). Best-effort:
     the risk engine being down must never break this service's own /screen response to the
-    frontend, so failures are logged and swallowed rather than raised."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            await client.post(
-                f"{RISK_ENGINE_URL}/flag-check",
-                json={"uuid": session_id, "module": "ocr", "flag": hard_fail, "reasons": reasons},
-            )
-            # If that flag was true, the risk engine already rejected and cleared this uuid —
-            # this second call still fires (simpler than branching), but lands on the
-            # already-finalized guard on the other end rather than a live wait.
-            await client.post(
-                f"{RISK_ENGINE_URL}/submit-score",
-                json={"uuid": session_id, "module": "ocr", "ocr": {"score": score, "reasons": reasons}},
-            )
-            logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, score=%s)", session_id, hard_fail, score)
-        except httpx.HTTPError as exc:
-            logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", session_id, exc)
+    frontend, so failures are logged and swallowed rather than raised. Circuit-breaker-backed
+    (see risk_engine_breaker.py) so a down risk-scoring-engine fails fast instead of costing
+    a full httpx timeout on every single request."""
+    try:
+        await _push_to_risk_engine(session_id, hard_fail, score, reasons)
+    except CircuitBreakerError:
+        logger.warning("uuid=%s risk-scoring-engine circuit open, skipping push", session_id)
+    except httpx.HTTPError as exc:
+        logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", session_id, exc)
 
 
 @asynccontextmanager
@@ -90,6 +106,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus to
+# scrape — see docker-compose.yml's prometheus service and monitoring/prometheus.yml.
+Instrumentator().instrument(app).expose(app)
 
 app.include_router(multilingual_router)
 
@@ -148,6 +171,12 @@ def health_check() -> Dict[str, Any]:
     }
 
 
+def _extract_text_isolated(image, lang: Optional[str]):
+    """Runs in an isolated worker process (see inference_pool.py) — this is the actual
+    PaddleOCR/Tesseract call, the one part of the pipeline that can segfault natively."""
+    return OCREngine.get_instance().extract_text(image, lang=lang)
+
+
 @app.post("/api/v1/extract-only", tags=["Extraction"])
 async def extract_only(
     file: UploadFile = File(...),
@@ -157,8 +186,7 @@ async def extract_only(
     """Step 1 Endpoint: Extract raw OCR text and parsed fields without running DB matching."""
     try:
         content = await file.read()
-        ingested = ingest_file(content, file.filename or "")
-        ocr_engine = OCREngine.get_instance()
+        ingested = await run_in_threadpool(ingest_file, content, file.filename or "")
 
         ocr_lang = None
         if expected_country and expected_country.upper() in COUNTRY_TO_LANG:
@@ -166,7 +194,10 @@ async def extract_only(
         elif expected_language:
             ocr_lang = f"eng+{expected_language}" if expected_language != "eng" else "eng"
 
-        ocr_res = await run_in_threadpool(ocr_engine.extract_text, ingested.images[0], lang=ocr_lang)
+        try:
+            ocr_res = await run_isolated(_extract_text_isolated, ingested.images[0], ocr_lang)
+        except InferenceCrashed as err:
+            raise HTTPException(status_code=503, detail=f"OCR engine crashed: {err}")
         parsed = extract_document_fields(ocr_res, expected_country=expected_country, expected_language=expected_language)
 
         return {
@@ -252,9 +283,11 @@ async def screen_document(
 
     try:
         content = await file.read()
-        ingested, ocr_res, parsed, match_outcome, decision, watchlist_hits, selected_candidate = await run_in_threadpool(
+        ingested, ocr_res, parsed, match_outcome, decision, watchlist_hits, selected_candidate = await run_isolated(
             _run_screening_pipeline, content, file.filename or "", expected_country, expected_language
         )
+    except InferenceCrashed as err:
+        raise HTTPException(status_code=503, detail=f"OCR pipeline crashed: {err}")
     except HTTPException:
         raise
     except Exception as err:
@@ -325,17 +358,14 @@ async def cross_verify_documents(files: List[UploadFile] = File(...)) -> Dict[st
     if len(files) < 2:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload at least 2 documents to cross-verify.")
 
-    ocr_engine = OCREngine.get_instance()
-
-    def _parse_one(content: bytes, filename: str) -> ParsedDocumentData:
-        ingested = ingest_file(content, filename)
-        ocr_res = ocr_engine.extract_text(ingested.images[0])
-        return extract_document_fields(ocr_res)
-
     async def _parse(f: UploadFile) -> ParsedDocumentData:
         try:
             content = await f.read()
-            return await run_in_threadpool(_parse_one, content, f.filename or "")
+            ingested = await run_in_threadpool(ingest_file, content, f.filename or "")
+            ocr_res = await run_isolated(_extract_text_isolated, ingested.images[0], None)
+            return await run_in_threadpool(extract_document_fields, ocr_res)
+        except InferenceCrashed as err:
+            raise HTTPException(status_code=503, detail=f"OCR engine crashed processing '{f.filename}': {err}")
         except Exception as err:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process '{f.filename}': {err}")
 
@@ -406,7 +436,9 @@ def verify_text_only(req: VerifyTextRequest) -> Dict[str, Any]:
 
 
 @app.post("/screen", tags=["Screening"])
+@limiter.limit(SCREEN_RATE_LIMIT)
 async def screen(
+    request: Request,
     uuid: str = Form(...),
     documents_present: str = Form(...),
     passport: Optional[UploadFile] = File(None),
@@ -453,10 +485,18 @@ async def screen(
 
     # Each document's OCR + matching + decision pipeline is independent until the
     # cross-document check below, and each one is CPU-bound (blocks a thread, not the
-    # event loop) — run them off the event loop and concurrently rather than one at a time.
+    # event loop) — run them off the event loop and concurrently rather than one at a time,
+    # each in its own isolated worker process (see inference_pool.py) so a native OCR crash
+    # only fails this one document instead of the whole service.
     async def _screen_one(key: str, file: UploadFile, content: bytes):
         try:
-            return key, await run_in_threadpool(_run_screening_pipeline, content, file.filename or key)
+            return key, await run_isolated(_run_screening_pipeline, content, file.filename or key)
+        except InferenceCrashed as err:
+            # Don't call _notify_risk_engine here — risk-scoring-engine's own timeout sweeper
+            # is explicitly designed for "one module crashed, or just never called back"
+            # (see its docstring) and will auto-escalate this uuid to MANUAL_REVIEW.
+            logger.error("uuid=%s OCR pipeline crashed for %s: %s", uuid, key, err)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"{key}: OCR pipeline crashed")
         except Exception as err:
             logger.error("Screening failed for %s: %s", key, err)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{key}: {err}")

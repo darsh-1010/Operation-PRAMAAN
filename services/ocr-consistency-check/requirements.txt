@@ -24,5 +24,17 @@ psycopg2-binary>=2.9.9
 # Result cache / cross-instance coordination
 redis>=5.0.0
 
+# Process-pool isolation for native-library inference calls (see inference_pool.py)
+loky>=3.4.0
+
+# Circuit breaker for the risk-scoring-engine push (see risk_engine_breaker.py)
+aiobreaker>=1.2.0
+
+# Rate limiting for the public /screen endpoint (see rate_limit.py)
+slowapi>=0.1.9
+
 # testing
 pytest>=8.0.0
+
+# Prometheus metrics (/metrics endpoint)
+prometheus-fastapi-instrumentator>=7.0.0

@@ -23,16 +23,23 @@ import uuid as py_uuid
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from aiobreaker import CircuitBreakerError
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.config import BiometricConfig, load_config
 from app.db import BiometricDB
 from app.domain.enums import ReasonCode
 from app.ml.preprocessing import detect_and_align, image_bytes_to_rgb
+from inference_pool import InferenceCrashed, run_isolated
+from rate_limit import SCREEN_RATE_LIMIT, limiter
 from result_cache import ResultCache
+from risk_engine_breaker import RISK_ENGINE_BREAKER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,25 +47,40 @@ logger = logging.getLogger(__name__)
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
 
 
+@RISK_ENGINE_BREAKER
+async def _push_to_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str]) -> None:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        await client.post(
+            f"{RISK_ENGINE_URL}/submit-score",
+            json={"uuid": uuid, "module": "photo", "photo": {"score": score, "hard_fail": hard_fail, "reasons": reasons}},
+        )
+    logger.info("uuid=%s pushed to risk-scoring-engine (score=%s, hard_fail=%s)", uuid, score, hard_fail)
+
+
 async def _notify_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str]) -> None:
     """Push this module's score to risk-scoring-engine as the "photo" module (see
     ../../services/risk-scoring-engine/README.md) — photo-match only ever calls /submit-score,
     never /flag-check; its hard_fail travels inside the score payload instead. Best-effort:
-    the risk engine being down must never break this service's own /screen response."""
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            await client.post(
-                f"{RISK_ENGINE_URL}/submit-score",
-                json={"uuid": uuid, "module": "photo", "photo": {"score": score, "hard_fail": hard_fail, "reasons": reasons}},
-            )
-            logger.info("uuid=%s pushed to risk-scoring-engine (score=%s, hard_fail=%s)", uuid, score, hard_fail)
-        except httpx.HTTPError as exc:
-            logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", uuid, exc)
+    the risk engine being down must never break this service's own /screen response.
+    Circuit-breaker-backed (see risk_engine_breaker.py) so a down risk-scoring-engine fails
+    fast instead of costing a full httpx timeout on every single request."""
+    try:
+        await _push_to_risk_engine(uuid, score, hard_fail, reasons)
+    except CircuitBreakerError:
+        logger.warning("uuid=%s risk-scoring-engine circuit open, skipping push", uuid)
+    except httpx.HTTPError as exc:
+        logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", uuid, exc)
 
 app = FastAPI(title="biometric-matching")
 # Dev CORS: the frontend calls this port directly from the browser. Restrict allow_origins
 # to the real frontend origin before this ever leaves a local dev machine.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["POST"], allow_headers=["*"])
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus.
+Instrumentator().instrument(app).expose(app)
 
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
@@ -151,7 +173,9 @@ def _run_face_pipeline(
 
 
 @app.post("/screen")
+@limiter.limit(SCREEN_RATE_LIMIT)
 async def screen(
+    request: Request,
     uuid: str = Form(...),
     documents_present: str = Form(...),
     passport: Optional[UploadFile] = File(None),
@@ -210,7 +234,13 @@ async def screen(
 
     async def _pipeline(data: bytes, label: str, check_liveness: bool = False) -> dict:
         try:
-            return await run_in_threadpool(_run_face_pipeline, data, label, check_liveness)
+            # Isolated worker process (see inference_pool.py): a native crash in OpenCV/
+            # DeepFace only fails this one image instead of the whole service.
+            return await run_isolated(_run_face_pipeline, data, label, check_liveness)
+        except InferenceCrashed:
+            logger.error("Face pipeline worker crashed for %s", label)
+            return {"detected": False, "reason": None, "label": label, "quality": 0.0,
+                    "embedding": None, "pipeline_error": True}
         except Exception:
             logger.exception("Face pipeline failed for %s", label)
             return {"detected": False, "reason": None, "label": label, "quality": 0.0,
