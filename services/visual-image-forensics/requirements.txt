@@ -14,8 +14,10 @@ torchvision
 # Circuit breaker for the risk-scoring-engine push (see risk_engine_breaker.py)
 aiobreaker>=1.2.0
 
-# Rate limiting for the public /screen endpoint (see rate_limit.py)
+# Rate limiting for the public /screen endpoint (see rate_limit.py) — needs the redis
+# client package itself for slowapi's Redis storage backend to work.
 slowapi>=0.1.9
+redis>=5.0.0
 
 # testing
 pytest>=8.0.0
