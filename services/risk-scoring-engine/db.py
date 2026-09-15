@@ -72,7 +72,17 @@ class RiskResultDB:
             try:
                 conn.autocommit = True
                 with conn.cursor() as cur:
-                    cur.execute(_SCHEMA)
+                    # WEB_CONCURRENCY workers each call _connect() independently at startup —
+                    # an advisory lock serializes "CREATE TABLE IF NOT EXISTS" across them.
+                    # Without it, two processes racing on the same DDL can both pass the
+                    # existence check and hit Postgres's own internal duplicate-catalog-row
+                    # error (not "already exists" — a genuine race, IF NOT EXISTS isn't atomic
+                    # across concurrent sessions).
+                    cur.execute("SELECT pg_advisory_lock(hashtext('risk_scoring_engine_schema'))")
+                    try:
+                        cur.execute(_SCHEMA)
+                    finally:
+                        cur.execute("SELECT pg_advisory_unlock(hashtext('risk_scoring_engine_schema'))")
             finally:
                 pool.putconn(conn)
             self._pg_pool = pool

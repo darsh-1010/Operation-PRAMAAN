@@ -54,6 +54,9 @@ services:
     env_file:
       - ./services/ocr-consistency-check/.env
     environment:
+      # Blank out .env's own DATABASE_URL (it hardcodes 127.0.0.1 for bare local dev) so
+      # db.py falls through to the POSTGRES_* vars below, which point at the compose network.
+      - DATABASE_URL=
       - POSTGRES_HOST=postgres
       - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004

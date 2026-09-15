@@ -66,7 +66,15 @@ class BiometricDB:
             try:
                 conn.autocommit = True
                 with conn.cursor() as cur:
-                    cur.execute(_SCHEMA)
+                    # WEB_CONCURRENCY workers each call _connect() independently at startup —
+                    # an advisory lock serializes "CREATE TABLE IF NOT EXISTS" across them
+                    # (IF NOT EXISTS isn't atomic against a concurrent session racing the
+                    # same DDL — see risk-scoring-engine/db.py for the same fix).
+                    cur.execute("SELECT pg_advisory_lock(hashtext('biometric_matching_schema'))")
+                    try:
+                        cur.execute(_SCHEMA)
+                    finally:
+                        cur.execute("SELECT pg_advisory_unlock(hashtext('biometric_matching_schema'))")
             finally:
                 pool.putconn(conn)
             self._pg_pool = pool

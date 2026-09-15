@@ -64,12 +64,14 @@ class DatabaseManager:
     def _init_postgres_schema(self) -> None:
         """Self-provision the same tables the SQLite fallback creates — no separate migration
         tool for a project this size (see CLAUDE.md: no speculative tooling for one service).
-        Idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING) so every service instance can run
-        this on startup without racing or duplicating the seed rows."""
+        IF NOT EXISTS / ON CONFLICT DO NOTHING make this idempotent across restarts, but
+        aren't atomic against another WEB_CONCURRENCY worker racing the same DDL at startup —
+        an advisory lock serializes that (see risk-scoring-engine/db.py for the same fix)."""
         conn = self._pg_pool.getconn()
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_lock(hashtext('ocr_consistency_check_schema'))")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ground_truth_records (
                         record_id TEXT PRIMARY KEY,
@@ -155,6 +157,7 @@ class DatabaseManager:
                         ('w3', 'BLACKLIST_PERSON', NULL, 'MALIK, TARIQ', '1979-03-25', 'IND', 'High-risk security watchlist', 'INTERPOL', 1)
                     ON CONFLICT (entry_id) DO NOTHING;
                 """)
+                cur.execute("SELECT pg_advisory_unlock(hashtext('ocr_consistency_check_schema'))")
         finally:
             self._pg_pool.putconn(conn)
         logger.info("PostgreSQL schema ready (tables created if missing, seed rows upserted).")
