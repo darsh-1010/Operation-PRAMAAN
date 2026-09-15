@@ -22,7 +22,7 @@ class DatabaseManager:
 
     def __init__(self) -> None:
         self.is_postgres = False
-        self._pg_conn = None
+        self._pg_pool = None
         self._sqlite_conn: Optional[sqlite3.Connection] = None
         self._init_connection()
 
@@ -41,19 +41,18 @@ class DatabaseManager:
         db = os.environ.get("POSTGRES_DB", "postgres")
         user = os.environ.get("POSTGRES_USER", "postgres")
         pwd = os.environ.get("POSTGRES_PASSWORD", "postgres")
+        pool_size = int(os.environ.get("POSTGRES_POOL_SIZE", "5"))
 
         try:
             import psycopg2
-            if db_url:
-                conn = psycopg2.connect(db_url, connect_timeout=3)
-            else:
-                conn = psycopg2.connect(
-                    host=host, port=port, dbname=db, user=user, password=pwd, connect_timeout=3
-                )
-            conn.autocommit = True
-            self._pg_conn = conn
+            from psycopg2.pool import ThreadedConnectionPool
+
+            dsn_kwargs = {"dsn": db_url} if db_url else dict(
+                host=host, port=port, dbname=db, user=user, password=pwd
+            )
+            self._pg_pool = ThreadedConnectionPool(1, pool_size, connect_timeout=3, **dsn_kwargs)
             self.is_postgres = True
-            logger.info("Connected to PostgreSQL database '%s' at %s:%s.", db, host, port)
+            logger.info("Connected to PostgreSQL database '%s' at %s:%s (pool size %s).", db, host, port, pool_size)
             self._init_postgres_schema()
         except Exception as err:
             logger.warning("PostgreSQL connection unavailable (%s). Initializing SQLite in-memory fallback.", err)
@@ -67,92 +66,97 @@ class DatabaseManager:
         tool for a project this size (see CLAUDE.md: no speculative tooling for one service).
         Idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING) so every service instance can run
         this on startup without racing or duplicating the seed rows."""
-        with self._pg_conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS ground_truth_records (
-                    record_id TEXT PRIMARY KEY,
-                    doc_type TEXT NOT NULL,
-                    id_number TEXT NOT NULL,
-                    full_name TEXT NOT NULL,
-                    dob TEXT NOT NULL,
-                    gender TEXT,
-                    issue_date TEXT,
-                    expiry_date TEXT,
-                    issuing_country TEXT DEFAULT 'IND',
-                    status TEXT DEFAULT 'ACTIVE'
-                );
+        conn = self._pg_pool.getconn()
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ground_truth_records (
+                        record_id TEXT PRIMARY KEY,
+                        doc_type TEXT NOT NULL,
+                        id_number TEXT NOT NULL,
+                        full_name TEXT NOT NULL,
+                        dob TEXT NOT NULL,
+                        gender TEXT,
+                        issue_date TEXT,
+                        expiry_date TEXT,
+                        issuing_country TEXT DEFAULT 'IND',
+                        status TEXT DEFAULT 'ACTIVE'
+                    );
 
-                CREATE TABLE IF NOT EXISTS watchlist_entries (
-                    entry_id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    doc_number TEXT,
-                    full_name TEXT,
-                    dob TEXT,
-                    nationality TEXT,
-                    reason TEXT,
-                    source TEXT,
-                    active INTEGER DEFAULT 1
-                );
+                    CREATE TABLE IF NOT EXISTS watchlist_entries (
+                        entry_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        doc_number TEXT,
+                        full_name TEXT,
+                        dob TEXT,
+                        nationality TEXT,
+                        reason TEXT,
+                        source TEXT,
+                        active INTEGER DEFAULT 1
+                    );
 
-                CREATE TABLE IF NOT EXISTS watchlist_hits (
-                    hit_id TEXT PRIMARY KEY,
-                    session_id TEXT,
-                    document_id TEXT,
-                    entry_id TEXT,
-                    match_basis TEXT,
-                    match_score REAL,
-                    is_hard_fail INTEGER DEFAULT 0
-                );
+                    CREATE TABLE IF NOT EXISTS watchlist_hits (
+                        hit_id TEXT PRIMARY KEY,
+                        session_id TEXT,
+                        document_id TEXT,
+                        entry_id TEXT,
+                        match_basis TEXT,
+                        match_score REAL,
+                        is_hard_fail INTEGER DEFAULT 0
+                    );
 
-                CREATE TABLE IF NOT EXISTS validation_checks (
-                    check_id TEXT PRIMARY KEY,
-                    document_id TEXT,
-                    module TEXT DEFAULT 'MODULE_1',
-                    check_type TEXT,
-                    field_key TEXT,
-                    status TEXT,
-                    is_hard_fail INTEGER DEFAULT 0,
-                    expected_value TEXT,
-                    observed_value TEXT,
-                    detail TEXT
-                );
+                    CREATE TABLE IF NOT EXISTS validation_checks (
+                        check_id TEXT PRIMARY KEY,
+                        document_id TEXT,
+                        module TEXT DEFAULT 'MODULE_1',
+                        check_type TEXT,
+                        field_key TEXT,
+                        status TEXT,
+                        is_hard_fail INTEGER DEFAULT 0,
+                        expected_value TEXT,
+                        observed_value TEXT,
+                        detail TEXT
+                    );
 
-                CREATE TABLE IF NOT EXISTS module_scores (
-                    score_id TEXT PRIMARY KEY,
-                    session_id TEXT,
-                    score_kind TEXT,
-                    value REAL,
-                    detail TEXT
-                );
+                    CREATE TABLE IF NOT EXISTS module_scores (
+                        score_id TEXT PRIMARY KEY,
+                        session_id TEXT,
+                        score_kind TEXT,
+                        value REAL,
+                        detail TEXT
+                    );
 
-                CREATE TABLE IF NOT EXISTS reason_codes (
-                    reason_id TEXT PRIMARY KEY,
-                    assessment_id TEXT,
-                    code TEXT,
-                    message TEXT,
-                    severity TEXT,
-                    contribution REAL
-                );
-            """)
-            cur.execute("""
-                INSERT INTO ground_truth_records
-                    (record_id, doc_type, id_number, full_name, dob, gender, issue_date, expiry_date, status)
-                VALUES
-                    ('g1', 'PASSPORT', 'P1234567', 'SHARMA, ARYA', '1995-08-15', 'M', '2020-01-10', '2030-01-09', 'ACTIVE'),
-                    ('g2', 'PASSPORT', 'L898902C', 'ERIKSSON, ANNA MARIA', '1974-08-12', 'F', '2019-01-01', '2029-01-01', 'ACTIVE'),
-                    ('g3', 'PASSPORT', 'R9999999', 'SINGH, VIKRAM', '1985-04-12', 'M', '2018-02-15', '2028-02-14', 'REVOKED'),
-                    ('g4', 'PASSPORT', 'E1111111', 'GUPTA, PRIYA', '1988-06-30', 'F', '2012-07-01', '2022-06-30', 'EXPIRED'),
-                    ('g5', 'NATIONAL_ID', '987654321012', 'KUMAR, ROHIT', '1990-11-20', 'M', '2015-05-01', '2035-05-01', 'ACTIVE')
-                ON CONFLICT (record_id) DO NOTHING;
+                    CREATE TABLE IF NOT EXISTS reason_codes (
+                        reason_id TEXT PRIMARY KEY,
+                        assessment_id TEXT,
+                        code TEXT,
+                        message TEXT,
+                        severity TEXT,
+                        contribution REAL
+                    );
+                """)
+                cur.execute("""
+                    INSERT INTO ground_truth_records
+                        (record_id, doc_type, id_number, full_name, dob, gender, issue_date, expiry_date, status)
+                    VALUES
+                        ('g1', 'PASSPORT', 'P1234567', 'SHARMA, ARYA', '1995-08-15', 'M', '2020-01-10', '2030-01-09', 'ACTIVE'),
+                        ('g2', 'PASSPORT', 'L898902C', 'ERIKSSON, ANNA MARIA', '1974-08-12', 'F', '2019-01-01', '2029-01-01', 'ACTIVE'),
+                        ('g3', 'PASSPORT', 'R9999999', 'SINGH, VIKRAM', '1985-04-12', 'M', '2018-02-15', '2028-02-14', 'REVOKED'),
+                        ('g4', 'PASSPORT', 'E1111111', 'GUPTA, PRIYA', '1988-06-30', 'F', '2012-07-01', '2022-06-30', 'EXPIRED'),
+                        ('g5', 'NATIONAL_ID', '987654321012', 'KUMAR, ROHIT', '1990-11-20', 'M', '2015-05-01', '2035-05-01', 'ACTIVE')
+                    ON CONFLICT (record_id) DO NOTHING;
 
-                INSERT INTO watchlist_entries
-                    (entry_id, kind, doc_number, full_name, dob, nationality, reason, source, active)
-                VALUES
-                    ('w1', 'BLACKLIST_DOC', 'B6666666', 'KHAN, DAWOOD', '1975-12-26', 'IND', 'Fraudulent Passport Flagged by CBI', 'NATIONAL_DB', 1),
-                    ('w2', 'LOST_STOLEN', 'S5555555', 'BROWN, DAVID', '1982-05-14', 'GBR', 'Stolen passport reported to Interpol SLTD', 'INTERPOL_SLTD', 1),
-                    ('w3', 'BLACKLIST_PERSON', NULL, 'MALIK, TARIQ', '1979-03-25', 'IND', 'High-risk security watchlist', 'INTERPOL', 1)
-                ON CONFLICT (entry_id) DO NOTHING;
-            """)
+                    INSERT INTO watchlist_entries
+                        (entry_id, kind, doc_number, full_name, dob, nationality, reason, source, active)
+                    VALUES
+                        ('w1', 'BLACKLIST_DOC', 'B6666666', 'KHAN, DAWOOD', '1975-12-26', 'IND', 'Fraudulent Passport Flagged by CBI', 'NATIONAL_DB', 1),
+                        ('w2', 'LOST_STOLEN', 'S5555555', 'BROWN, DAVID', '1982-05-14', 'GBR', 'Stolen passport reported to Interpol SLTD', 'INTERPOL_SLTD', 1),
+                        ('w3', 'BLACKLIST_PERSON', NULL, 'MALIK, TARIQ', '1979-03-25', 'IND', 'High-risk security watchlist', 'INTERPOL', 1)
+                    ON CONFLICT (entry_id) DO NOTHING;
+                """)
+        finally:
+            self._pg_pool.putconn(conn)
         logger.info("PostgreSQL schema ready (tables created if missing, seed rows upserted).")
 
     def _init_sqlite_schema(self) -> None:
@@ -245,15 +249,19 @@ class DatabaseManager:
 
     def query(self, sql: str, params: Tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
         """Execute a SELECT query and return rows as dictionaries."""
-        if self.is_postgres and self._pg_conn is not None:
+        if self.is_postgres and self._pg_pool is not None:
+            conn = self._pg_pool.getconn()
             try:
+                conn.autocommit = True
                 import psycopg2.extras
-                with self._pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(sql, params)
                     rows = cur.fetchall()
                     return [dict(r) for r in rows]
             except Exception as err:
                 logger.error("Postgres query failed (%s). Reverting query to fallback.", err)
+            finally:
+                self._pg_pool.putconn(conn)
 
         # Fallback SQLite query
         cur = self._sqlite_conn.cursor()
@@ -265,13 +273,17 @@ class DatabaseManager:
 
     def execute(self, sql: str, params: Tuple[Any, ...] = ()) -> None:
         """Execute an INSERT/UPDATE statement."""
-        if self.is_postgres and self._pg_conn is not None:
+        if self.is_postgres and self._pg_pool is not None:
+            conn = self._pg_pool.getconn()
             try:
-                with self._pg_conn.cursor() as cur:
+                conn.autocommit = True
+                with conn.cursor() as cur:
                     cur.execute(sql, params)
                 return
             except Exception as err:
                 logger.error("Postgres execute failed: %s", err)
+            finally:
+                self._pg_pool.putconn(conn)
 
         cur = self._sqlite_conn.cursor()
         sql_converted = sql.replace("%s", "?")

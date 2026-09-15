@@ -20,6 +20,21 @@ services:
       timeout: 3s
       retries: 10
 
+  # Shared by ocr-consistency-check, biometric-matching (result caches, keyed by uploaded-
+  # file content hash) and risk-scoring-engine (cross-instance pending/result coordination,
+  # see that service's store.py). One instance, several key namespaces — same reasoning as
+  # the single postgres instance above.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   frontend:
     build: ./frontend
     ports:
@@ -40,9 +55,12 @@ services:
       - ./services/ocr-consistency-check/.env
     environment:
       - POSTGRES_HOST=postgres
+      - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       risk-scoring-engine:
         condition: service_started
@@ -66,9 +84,12 @@ services:
       - ./services/biometric-matching/.env
     environment:
       - POSTGRES_HOST=postgres
+      - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       risk-scoring-engine:
         condition: service_started
@@ -81,8 +102,11 @@ services:
       - ./services/risk-scoring-engine/.env
     environment:
       - POSTGRES_HOST=postgres
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:

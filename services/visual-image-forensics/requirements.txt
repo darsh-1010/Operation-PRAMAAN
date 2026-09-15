@@ -10,3 +10,6 @@ numpy
 pillow
 torch
 torchvision
+
+# testing
+pytest>=8.0.0

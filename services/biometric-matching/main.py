@@ -14,6 +14,7 @@ Pipeline status (2026-09-09):
   [ ] Database persistence — no database in stack yet
   [ ] Milvus integration — not yet needed
 """
+import asyncio
 import io
 import json
 import logging
@@ -23,6 +24,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
@@ -30,6 +32,7 @@ from app.config import BiometricConfig, load_config
 from app.db import BiometricDB
 from app.domain.enums import ReasonCode
 from app.ml.preprocessing import detect_and_align, image_bytes_to_rgb
+from result_cache import ResultCache
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -63,6 +66,7 @@ MAX_VIDEO_BYTES = 50 * 1024 * 1024
 # Load configuration and DB connection once at startup.
 _config: BiometricConfig = load_config()
 _db = BiometricDB.get_instance()
+_cache = ResultCache(namespace="biometric")
 
 
 def validate_image(data: bytes, field: str) -> None:
@@ -184,24 +188,54 @@ async def screen(
 
     logger.info("uuid=%s /screen received: docs=%s selfie=%s", uuid, list(doc_data.keys()), selfie_data is not None)
 
+    # Same exact set of files re-submitted (retry, refresh, duplicate kiosk scan)? The face
+    # pipeline is deterministic for identical input, so skip re-running detection/embedding/
+    # matching entirely and reuse last time's result. Order is fixed (docs by key, then
+    # selfie) so the same submission always fingerprints the same way.
+    fingerprint = ResultCache.fingerprint(
+        *(doc_data[k] for k in sorted(doc_data)), *( [selfie_data] if selfie_data is not None else [] )
+    )
+    cached = _cache.get(fingerprint)
+    if cached is not None:
+        logger.info("uuid=%s /screen cache hit (fingerprint=%s)", uuid, fingerprint[:12])
+        await _notify_risk_engine(uuid, cached["score"], cached["hard_fail"], cached["reason_codes"])
+        return cached
+
     # --- Face pipeline ---
+    # Face detection + embedding is CPU/GPU-bound (blocks a thread, not the event loop) and
+    # each image is independent of the others until the matching step below — run them off
+    # the event loop and concurrently instead of one at a time.
     reason_codes: list[str] = []
     hard_fail = False
 
-    # Process selfie
-    selfie_result = None
-    if selfie_data is not None:
+    async def _pipeline(data: bytes, label: str, check_liveness: bool = False) -> dict:
         try:
-            selfie_result = _run_face_pipeline(selfie_data, "selfie", check_liveness=True)
+            return await run_in_threadpool(_run_face_pipeline, data, label, check_liveness)
+        except Exception:
+            logger.exception("Face pipeline failed for %s", label)
+            return {"detected": False, "reason": None, "label": label, "quality": 0.0,
+                    "embedding": None, "pipeline_error": True}
+
+    selfie_task = _pipeline(selfie_data, "selfie", check_liveness=True) if selfie_data is not None else None
+    doc_tasks = {key: _pipeline(data, key) for key, data in doc_data.items()}
+    gathered = await asyncio.gather(*([selfie_task] if selfie_task else []), *doc_tasks.values())
+    it = iter(gathered)
+    selfie_result = next(it) if selfie_task else None
+    doc_results: dict[str, dict] = dict(zip(doc_tasks.keys(), it))
+
+    if selfie_result is not None:
+        if selfie_result.get("pipeline_error"):
+            reason_codes.append("selfie: face_pipeline_error")
+        else:
             if not selfie_result["detected"]:
                 reason_codes.append(f"selfie: {ReasonCode.FACE_NOT_DETECTED.value}")
             elif selfie_result.get("reason"):
                 reason_codes.append(f"selfie: {selfie_result['reason']}")
-                
+
             # Liveness Evaluation
             if selfie_result.get("liveness_score") is not None:
                 l_score = selfie_result["liveness_score"]
-                # Deepface's antispoof_score isn't always strictly 0-1, but let's 
+                # Deepface's antispoof_score isn't always strictly 0-1, but let's
                 # treat higher as more likely to be real based on typical conventions,
                 # or evaluate based on our thresholds.
                 # If the score indicates spoofing based on our threshold:
@@ -211,22 +245,14 @@ async def screen(
                 elif l_score < _config.liveness.review_threshold:
                     reason_codes.append(f"selfie: {ReasonCode.LIVENESS_REVIEW_REQUIRED.value} (score={l_score:.2f})")
 
-        except Exception:
-            logger.exception("Face pipeline failed for selfie")
-            reason_codes.append("selfie: face_pipeline_error")
-
-    # Process document faces
-    doc_results: dict[str, dict] = {}
-    for key, data in doc_data.items():
-        try:
-            doc_results[key] = _run_face_pipeline(data, key)
-            if not doc_results[key]["detected"]:
-                reason_codes.append(f"{key}: {ReasonCode.FACE_NOT_DETECTED.value}")
-            elif doc_results[key].get("reason"):
-                reason_codes.append(f"{key}: {doc_results[key]['reason']}")
-        except Exception:
-            logger.exception("Face pipeline failed for %s", key)
+    # Process document faces (pipeline already ran concurrently above)
+    for key, result in doc_results.items():
+        if result.get("pipeline_error"):
             reason_codes.append(f"{key}: face_pipeline_error")
+        elif not result["detected"]:
+            reason_codes.append(f"{key}: {ReasonCode.FACE_NOT_DETECTED.value}")
+        elif result.get("reason"):
+            reason_codes.append(f"{key}: {result['reason']}")
 
     # --- Doc-to-selfie matching ---
     from app.ml import similarity as sim_module
@@ -322,7 +348,11 @@ async def screen(
     logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, api_score, hard_fail, reason_codes)
 
     documents_checked = list(doc_data.keys()) + (["selfie"] if selfie_data is not None else [])
-    _db.save_result(str(py_uuid.uuid4()), uuid, api_score, hard_fail, reason_codes, documents_checked)
+    await run_in_threadpool(
+        _db.save_result, str(py_uuid.uuid4()), uuid, api_score, hard_fail, reason_codes, documents_checked
+    )
 
+    result = {"score": api_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
+    _cache.set(fingerprint, result)
     await _notify_risk_engine(uuid, api_score, hard_fail, reason_codes)
-    return {"score": api_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
+    return result

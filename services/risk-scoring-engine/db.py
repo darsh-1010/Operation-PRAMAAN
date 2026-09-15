@@ -41,7 +41,7 @@ class RiskResultDB:
 
     def __init__(self) -> None:
         self.is_postgres = False
-        self._pg_conn = None
+        self._pg_pool = None
         self._sqlite_conn: Optional[sqlite3.Connection] = None
         self._connect()
 
@@ -58,19 +58,26 @@ class RiskResultDB:
         db = os.environ.get("POSTGRES_DB", "postgres")
         user = os.environ.get("POSTGRES_USER", "postgres")
         pwd = os.environ.get("POSTGRES_PASSWORD", "postgres")
+        pool_size = int(os.environ.get("POSTGRES_POOL_SIZE", "5"))
 
         try:
             import psycopg2
-            if db_url:
-                conn = psycopg2.connect(db_url, connect_timeout=3)
-            else:
-                conn = psycopg2.connect(host=host, port=port, dbname=db, user=user, password=pwd, connect_timeout=3)
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(_SCHEMA)
-            self._pg_conn = conn
+            from psycopg2.pool import ThreadedConnectionPool
+
+            dsn_kwargs = {"dsn": db_url} if db_url else dict(
+                host=host, port=port, dbname=db, user=user, password=pwd
+            )
+            pool = ThreadedConnectionPool(1, pool_size, connect_timeout=3, **dsn_kwargs)
+            conn = pool.getconn()
+            try:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute(_SCHEMA)
+            finally:
+                pool.putconn(conn)
+            self._pg_pool = pool
             self.is_postgres = True
-            logger.info("Connected to PostgreSQL database '%s' at %s:%s.", db, host, port)
+            logger.info("Connected to PostgreSQL database '%s' at %s:%s (pool size %s).", db, host, port, pool_size)
         except Exception as err:
             logger.warning("PostgreSQL connection unavailable (%s). Initializing SQLite in-memory fallback.", err)
             self.is_postgres = False
@@ -87,9 +94,14 @@ class RiskResultDB:
         """
         params = (result_id, session_id, score, decision, int(hard_fail), int(timed_out), json.dumps(reasons))
         try:
-            if self.is_postgres and self._pg_conn is not None:
-                with self._pg_conn.cursor() as cur:
-                    cur.execute(sql, params)
+            if self.is_postgres and self._pg_pool is not None:
+                conn = self._pg_pool.getconn()
+                try:
+                    conn.autocommit = True
+                    with conn.cursor() as cur:
+                        cur.execute(sql, params)
+                finally:
+                    self._pg_pool.putconn(conn)
             else:
                 cur = self._sqlite_conn.cursor()
                 cur.execute(sql.replace("%s", "?"), params)

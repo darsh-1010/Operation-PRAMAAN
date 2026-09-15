@@ -16,3 +16,9 @@ tf-keras
 
 # configuration
 pyyaml
+
+# result cache
+redis>=5.0.0
+
+# testing
+pytest>=8.0.0

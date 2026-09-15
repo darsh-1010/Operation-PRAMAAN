@@ -1,6 +1,6 @@
 """Runnable self-check for POST /screen — start the real server and hit it over HTTP,
 using only the stdlib (no test-framework dependency for a single endpoint check).
-Run: python test_main.py
+Run: python test_main.py, or via pytest as test_screen_endpoint.
 
 Tests are split into two groups:
   1. Contract tests (from the original stub) — verify the API shape and input validation.
@@ -146,6 +146,9 @@ def main() -> None:
     print(f"\nResults: {passed} passed, {failed} failed")
     if failed:
         raise SystemExit(1)
+
+
+test_screen_endpoint = main  # pytest collects this as a test; `python test_main.py` still works below.
 
 
 if __name__ == "__main__":

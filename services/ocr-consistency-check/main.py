@@ -7,6 +7,7 @@ and weighted Score A calculation.
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -29,12 +31,14 @@ from ingestion import IngestedDocument, ingest_file
 from matcher import MatchOutcome, match_against_candidate
 from multilingual_service import router as multilingual_router
 from ocr_engine import OCREngine
+from result_cache import ResultCache
 from script_detector import COUNTRY_TO_LANG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ocr_service")
 
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
+_cache = ResultCache(namespace="ocr")
 
 
 async def _notify_risk_engine(session_id: str, hard_fail: bool, score: float, reasons: List[str]) -> None:
@@ -162,7 +166,7 @@ async def extract_only(
         elif expected_language:
             ocr_lang = f"eng+{expected_language}" if expected_language != "eng" else "eng"
 
-        ocr_res = ocr_engine.extract_text(ingested.images[0], lang=ocr_lang)
+        ocr_res = await run_in_threadpool(ocr_engine.extract_text, ingested.images[0], lang=ocr_lang)
         parsed = extract_document_fields(ocr_res, expected_country=expected_country, expected_language=expected_language)
 
         return {
@@ -248,8 +252,8 @@ async def screen_document(
 
     try:
         content = await file.read()
-        ingested, ocr_res, parsed, match_outcome, decision, watchlist_hits, selected_candidate = _run_screening_pipeline(
-            content, file.filename or "", expected_country, expected_language
+        ingested, ocr_res, parsed, match_outcome, decision, watchlist_hits, selected_candidate = await run_in_threadpool(
+            _run_screening_pipeline, content, file.filename or "", expected_country, expected_language
         )
     except HTTPException:
         raise
@@ -257,7 +261,7 @@ async def screen_document(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File ingestion error: {err}")
 
     # Database Persistence
-    _persist_screening_session(s_id, d_id, ingested, ocr_res, parsed, decision, watchlist_hits)
+    await run_in_threadpool(_persist_screening_session, s_id, d_id, ingested, ocr_res, parsed, decision, watchlist_hits)
 
     cand_dict = None
     if selected_candidate:
@@ -322,15 +326,20 @@ async def cross_verify_documents(files: List[UploadFile] = File(...)) -> Dict[st
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload at least 2 documents to cross-verify.")
 
     ocr_engine = OCREngine.get_instance()
-    parsed_docs: List[ParsedDocumentData] = []
-    for f in files:
+
+    def _parse_one(content: bytes, filename: str) -> ParsedDocumentData:
+        ingested = ingest_file(content, filename)
+        ocr_res = ocr_engine.extract_text(ingested.images[0])
+        return extract_document_fields(ocr_res)
+
+    async def _parse(f: UploadFile) -> ParsedDocumentData:
         try:
             content = await f.read()
-            ingested = ingest_file(content, f.filename or "")
-            ocr_res = ocr_engine.extract_text(ingested.images[0])
-            parsed_docs.append(extract_document_fields(ocr_res))
+            return await run_in_threadpool(_parse_one, content, f.filename or "")
         except Exception as err:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process '{f.filename}': {err}")
+
+    parsed_docs: List[ParsedDocumentData] = await asyncio.gather(*(_parse(f) for f in files))
 
     outcome = cross_check_documents(parsed_docs)
     return {
@@ -429,25 +438,46 @@ async def screen(
 
     logger.info("uuid=%s /screen received: docs=%s", uuid, [k for k, _ in uploaded])
 
+    contents = [(key, file, await file.read()) for key, file in uploaded]
+
+    # Same exact set of document bytes re-submitted (retry, refresh, duplicate kiosk scan)?
+    # Skip the OCR/watchlist pipeline entirely and reuse last time's result — it's
+    # deterministic for identical input. The risk-scoring-engine push still happens below
+    # with this call's own uuid, so per-submission coordination is unaffected.
+    fingerprint = ResultCache.fingerprint(*(c for _, _, c in contents))
+    cached = _cache.get(fingerprint)
+    if cached is not None:
+        logger.info("uuid=%s /screen cache hit (fingerprint=%s)", uuid, fingerprint[:12])
+        await _notify_risk_engine(uuid, cached["hard_fail"], cached["score"], cached["reason_codes"])
+        return cached
+
+    # Each document's OCR + matching + decision pipeline is independent until the
+    # cross-document check below, and each one is CPU-bound (blocks a thread, not the
+    # event loop) — run them off the event loop and concurrently rather than one at a time.
+    async def _screen_one(key: str, file: UploadFile, content: bytes):
+        try:
+            return key, await run_in_threadpool(_run_screening_pipeline, content, file.filename or key)
+        except Exception as err:
+            logger.error("Screening failed for %s: %s", key, err)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{key}: {err}")
+
+    results = await asyncio.gather(*(_screen_one(key, file, content) for key, file, content in contents))
+
     reason_codes: List[str] = []
     scores: List[float] = []
     hard_fail = False
     parsed_docs: List[ParsedDocumentData] = []
 
-    for key, file in uploaded:
-        content = await file.read()
-        try:
-            ingested, ocr_res, parsed, _, decision, watchlist_hits, _ = _run_screening_pipeline(content, file.filename or key)
-        except Exception as err:
-            logger.error("Screening failed for %s: %s", key, err)
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{key}: {err}")
+    for key, (ingested, ocr_res, parsed, _, decision, watchlist_hits, _) in results:
         parsed_docs.append(parsed)
         scores.append(decision.score)
         hard_fail = hard_fail or decision.hard_fail
         reason_codes.extend(r.code for r in decision.reason_codes)
         # session_id = the frontend's submission uuid (shared across all documents in this
         # call); document_id is per-document since each upload is its own audit row.
-        _persist_screening_session(uuid, str(py_uuid.uuid4()), ingested, ocr_res, parsed, decision, watchlist_hits)
+        await run_in_threadpool(
+            _persist_screening_session, uuid, str(py_uuid.uuid4()), ingested, ocr_res, parsed, decision, watchlist_hits
+        )
 
     if len(parsed_docs) > 1:
         cross = cross_check_documents(parsed_docs)
@@ -457,8 +487,10 @@ async def screen(
 
     final_score = min(scores) if scores else 0
     logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, final_score, hard_fail, reason_codes)
+    result = {"score": final_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
+    _cache.set(fingerprint, result)
     await _notify_risk_engine(uuid, hard_fail, final_score, reason_codes)
-    return {"score": final_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
+    return result
 
 
 def _persist_screening_session(
