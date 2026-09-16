@@ -1,20 +1,10 @@
-"""Optimized OCR Engine using PaddleOCR with fallback support.
-
-Configured for high accuracy on identity documents and low inference latency:
-- Singleton warm-loaded model instance (PP-OCRv4)
-- CPU multi-threading and MKLDNN acceleration enabled
-- Automatic angle / orientation classification
-- Extracts text blocks, normalized bounding boxes, and confidence scores
-"""
 """Optimized OCR Engine using PaddleOCR with fallback support."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import os
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
 import cv2
 import numpy as np
 
@@ -28,7 +18,6 @@ class TextBlock:
     """Individual OCR text block with coordinates and confidence."""
     text: str
     confidence: float
-    bbox: Dict[str, float]  # {"x": int, "y": int, "w": int, "h": int}
     bbox: Dict[str, float]
     polygon: List[List[float]] = field(default_factory=list)
 
@@ -53,27 +42,18 @@ class OCREngine:
 
     @classmethod
     def get_instance(cls) -> "OCREngine":
-        """Retrieve the singleton OCR engine instance."""
         if cls._instance is None:
             cls._instance = cls()
             cls._instance._initialize()
         return cls._instance
 
     def _initialize(self) -> None:
-        """Initialize PaddleOCR with high-performance CPU settings."""
         """Initialize PaddleOCR with high-speed settings avoiding 3D unwarping overhead."""
         try:
             os.environ["FLAGS_use_mkldnn"] = "0"
             os.environ["FLAGS_enable_pir_api"] = "0"
             from paddleocr import PaddleOCR
-            cpu_threads = int(os.environ.get("CPU_THREADS", os.cpu_count() or 4))
-            enable_mkldnn = os.environ.get("ENABLE_MKLDNN", "true").lower() == "true"
-            use_angle_cls = os.environ.get("USE_ANGLE_CLS", "true").lower() == "true"
             lang = os.environ.get("OCR_LANG", "en")
-
-            logger.info("Initializing PaddleOCR with lang=%s...", lang)
-            # PaddleOCR 3.x uses use_textline_orientation, 2.x uses use_angle_cls
-            init_kwargs = {"lang": lang}
             logger.info("Initializing PaddleOCR (fast pipeline, lang=%s)...", lang)
 
             init_kwargs = {
@@ -85,15 +65,6 @@ class OCREngine:
                 "use_textline_orientation": False,
             }
             try:
-                self._paddle_ocr = PaddleOCR(use_textline_orientation=use_angle_cls, **init_kwargs)
-            except (TypeError, ValueError):
-                try:
-                    self._paddle_ocr = PaddleOCR(use_angle_cls=use_angle_cls, **init_kwargs)
-                except Exception:
-                    self._paddle_ocr = PaddleOCR(**init_kwargs)
-
-            self._engine_name = "paddleocr-3.7"
-            logger.info("PaddleOCR engine initialized successfully.")
                 self._paddle_ocr = PaddleOCR(**init_kwargs)
             except Exception as err:
                 logger.warning("PP-OCRv6_small load failed (%s). Retrying default...", err)
@@ -102,23 +73,15 @@ class OCREngine:
             self._engine_name = "paddleocr-v6-small"
             logger.info("PaddleOCR engine (PP-OCRv6_small) initialized successfully.")
         except Exception as err:
-            logger.warning("Failed to initialize PaddleOCR (%s). Fallback to Tesseract will be used.", err)
             logger.warning("PaddleOCR init failed (%s). Fallback to Tesseract will be used.", err)
             self._paddle_ocr = None
             self._engine_name = "tesseract-fallback"
 
     def extract_text(self, image: np.ndarray, lang: Optional[str] = None) -> OCRResult:
-        """Extract text blocks, lines, and bounding boxes from an RGB image.
-
-        If a regional language is requested (e.g. 'eng+nep', 'nep', 'hin', 'ben', 'urd'),
-        routes to the dedicated multilingual Tesseract engine instead of the default
-        PaddleOCR / English-Tesseract path below.
-        """
         if lang and lang.lower() not in ("en", "eng"):
             from multilingual_ocr import MultilingualOCREngine
             return MultilingualOCREngine.get_instance().extract_text(image, lang=lang)
 
-        if self._paddle_ocr is not None:
         engine_cfg = os.environ.get("OCR_ENGINE", "paddleocr").lower()
         use_paddle = engine_cfg in ("paddleocr", "paddle") or os.environ.get("USE_PADDLEOCR", "false").lower() == "true"
         if use_paddle and self._paddle_ocr is not None:
@@ -127,11 +90,9 @@ class OCREngine:
             except Exception as err:
                 logger.error("PaddleOCR inference failed: %s. Falling back to Tesseract.", err)
 
-        return self._extract_tesseract(image)
         return extract_tesseract(image, TextBlock, OCRResult)
 
     def _extract_paddle(self, image: np.ndarray) -> OCRResult:
-        """Execute OCR extraction using PaddleOCR with format compatibility."""
         """Run fast inference with pre-scaling for large phone camera captures."""
         h, w = image.shape[:2]
         max_dim = max(h, w)
@@ -142,16 +103,12 @@ class OCREngine:
             proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
         try:
-            raw_res = self._paddle_ocr.ocr(image)
-        except TypeError:
-            raw_res = list(self._paddle_ocr.predict(image))
             raw_res = list(self._paddle_ocr.predict(proc_img)) if hasattr(self._paddle_ocr, "predict") else self._paddle_ocr.ocr(proc_img)
         except Exception:
             raw_res = self._paddle_ocr.ocr(proc_img) if not hasattr(self._paddle_ocr, "predict") else list(self._paddle_ocr.predict(proc_img))
 
         blocks: List[TextBlock] = []
         confidences: List[float] = []
-
         inv_scale = 1.0 / scale if scale != 1.0 else 1.0
 
 <<<<<<< Updated upstream
@@ -236,13 +193,7 @@ class OCREngine:
                 if polygon and len(polygon) >= 4:
                     xs = [pt[0] for pt in polygon]
                     ys = [pt[1] for pt in polygon]
-                    min_x, max_x = min(xs), max(xs)
-                    min_y, max_y = min(ys), max(ys)
                     bbox = {
-                        "x": round(float(min_x), 2),
-                        "y": round(float(min_y), 2),
-                        "w": round(float(max_x - min_x), 2),
-                        "h": round(float(max_y - min_y), 2),
                         "x": round(float(min(xs)), 2),
                         "y": round(float(min(ys)), 2),
                         "w": round(float(max(xs) - min(xs)), 2),
@@ -305,100 +256,8 @@ class OCREngine:
                     blocks.append(TextBlock(text=text_clean, confidence=conf_val, bbox=bbox, polygon=poly_list))
 
         lines = [b.text for b in blocks]
-        full_text = "\n".join(lines)
         avg_conf = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
-
         return OCRResult(
-            blocks=blocks,
-            full_text=full_text,
-            lines=lines,
-            engine="paddleocr-3.7",
-            model_version="PP-OCRv4",
-            average_confidence=avg_conf,
             blocks=blocks, full_text="\n".join(lines), lines=lines,
             engine="paddleocr-3.7", model_version="PP-OCRv6", average_confidence=avg_conf
         )
-
-    def _extract_tesseract(self, image: np.ndarray) -> OCRResult:
-        """High-accuracy fallback extraction using pytesseract with preprocessing and MRZ crop."""
-        try:
-            import cv2
-            import pytesseract
-
-            h, w = image.shape[:2]
-            # Preprocessing: upscale low-resolution uploads (identity docs need >= 1200px width)
-            scale = max(1.0, 1200.0 / w)
-            if scale > 1.05:
-                proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
-            else:
-                proc_img = image
-
-            if len(proc_img.shape) == 3:
-                gray = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = proc_img
-
-            # Extract word data with line groupings
-            data = pytesseract.image_to_data(gray, config="--psm 6", output_type=pytesseract.Output.DICT)
-            blocks: List[TextBlock] = []
-            confidences: List[float] = []
-            lines_map: Dict[Any, List[str]] = {}
-
-            n_boxes = len(data["text"])
-            for i in range(n_boxes):
-                text = data["text"][i].strip()
-                conf_raw = float(data["conf"][i])
-                if not text or conf_raw <= 0:
-                    continue
-
-                conf = round(conf_raw / 100.0, 4)
-                bbox = {
-                    "x": round(float(data["left"][i]) / scale, 2),
-                    "y": round(float(data["top"][i]) / scale, 2),
-                    "w": round(float(data["width"][i]) / scale, 2),
-                    "h": round(float(data["height"][i]) / scale, 2),
-                }
-                confidences.append(conf)
-                blocks.append(TextBlock(text=text, confidence=conf, bbox=bbox))
-
-                line_key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
-                if line_key not in lines_map:
-                    lines_map[line_key] = []
-                lines_map[line_key].append(text)
-
-            lines = [" ".join(words) for words in lines_map.values() if words]
-
-            # If MRZ not clearly detected in main pass, run dedicated MRZ bottom scan
-            has_mrz = any("<" in l and len(l) >= 25 for l in lines)
-            if not has_mrz and h >= 100:
-                mrz_h_start = int(gray.shape[0] * 0.70)
-                mrz_crop = gray[mrz_h_start:, :]
-                mrz_text = pytesseract.image_to_string(
-                    mrz_crop,
-                    config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
-                )
-                for m_line in mrz_text.splitlines():
-                    m_clean = m_line.strip()
-                    if "<" in m_clean and len(m_clean) >= 20:
-                        lines.append(m_clean)
-
-            avg_conf = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
-            return OCRResult(
-                blocks=blocks,
-                full_text="\n".join(lines),
-                lines=lines,
-                engine="tesseract-5",
-                model_version="standard",
-                average_confidence=avg_conf,
-            )
-        except Exception as err:
-            logger.error("Tesseract fallback also failed: %s", err)
-            return OCRResult(
-                blocks=[],
-                full_text="",
-                lines=[],
-                engine="none",
-                model_version="none",
-                average_confidence=0.0,
-            )
-
