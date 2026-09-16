@@ -1,55 +1,122 @@
 """Scoring and Decision Matrix Engine.
 
 Calculates Module 1 (Score A) across identity elements:
-- ID Match: 35%
-- Name Fuzzy Match: 30%
-- DOB Match: 20%
-- Document Status & Expiry: 15%
-
-Applies hard-fail rules (Watchlist hit, Revoked status, MRZ tampering)
-and classifies the encounter as: VERIFIED, NEEDS REVIEW, or NOT VERIFIED.
+- MRZ / Format Integrity: 35%
+- VIZ vs MRZ Consistency: 35%
+- Expiry / Validity: 20%
+- Extraction Completeness: 10%
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime
+from typing import Any, List, Optional
 
 from candidate_search import WatchlistHitResult
+from decision_models import (
+    DecisionOutcome,
+    ReasonCode,
+    ValidationCheckRecord,
+    validate_field_formats,
+)
 from field_extractor import ParsedDocumentData
 from matcher import MatchOutcome
 
-
-@dataclass
-class ReasonCode:
-    """Explainability reason code for risk assessment."""
-    code: str
-    message: str
-    severity: str  # 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'
-    contribution: float  # How much it moved or penalized the score
+# Re-export for backward compatibility
+_validate_field_formats = validate_field_formats
 
 
-@dataclass
-class ValidationCheckRecord:
-    """Corresponds to the validation_checks table."""
-    check_type: str  # 'MRZ_CHECKSUM', 'FIELD_FORMAT', 'EXPIRY', 'VIZ_MRZ_CROSSCHECK'
-    field_key: Optional[str]
-    status: str      # 'PASS', 'FAIL', 'WARN', 'SKIPPED'
-    is_hard_fail: bool
-    expected_value: Optional[str]
-    observed_value: Optional[str]
-    detail: str
+def _check_watchlist(hits: List[WatchlistHitResult], reasons: List[ReasonCode], checks: List[ValidationCheckRecord]) -> bool:
+    if not hits:
+        return False
+    for hit in hits:
+        reasons.append(ReasonCode(
+            code=f"WATCHLIST_HIT_{hit.kind}",
+            message=f"Flagged on {hit.source} watchlist: {hit.reason}",
+            severity="CRITICAL",
+            contribution=1.0,
+        ))
+        checks.append(ValidationCheckRecord(
+            check_type="WATCHLIST_LOOKUP",
+            field_key="document_number",
+            status="FAIL",
+            is_hard_fail=True,
+            expected_value="NOT_ON_WATCHLIST",
+            observed_value=hit.kind,
+            detail=hit.reason,
+        ))
+    return True
 
 
-@dataclass
-class DecisionOutcome:
-    """Consolidated Module 1 decision output matching the cross-service contract."""
-    status: str               # 'VERIFIED', 'NEEDS REVIEW', 'NOT VERIFIED'
-    score: float              # 0..100 display score
-    canonical_score: float    # 0..1 database score
-    hard_fail: bool
-    reason_codes: List[ReasonCode] = field(default_factory=list)
-    validation_checks: List[ValidationCheckRecord] = field(default_factory=list)
-    sub_scores: Dict[str, float] = field(default_factory=dict)
+def _check_mrz(mrz: Any, reasons: List[ReasonCode], checks: List[ValidationCheckRecord]) -> bool:
+    if not mrz:
+        return False
+    if mrz.has_checksum_failure:
+        fail_desc = "; ".join(mrz.failure_details)
+        reasons.append(ReasonCode(
+            code="MRZ_CHECKSUM_FAILED",
+            message=f"MRZ check digit validation failed: {fail_desc}",
+            severity="CRITICAL",
+            contribution=0.8,
+        ))
+        checks.append(ValidationCheckRecord(
+            check_type="MRZ_CHECKSUM",
+            field_key="mrz",
+            status="FAIL",
+            is_hard_fail=True,
+            expected_value="VALID_CHECKSUM",
+            observed_value="INVALID",
+            detail=fail_desc,
+        ))
+        return True
+    checks.append(ValidationCheckRecord(
+        check_type="MRZ_CHECKSUM",
+        field_key="mrz",
+        status="PASS",
+        is_hard_fail=False,
+        expected_value="VALID_CHECKSUM",
+        observed_value="VALID",
+        detail="All MRZ check digits verified against ICAO 9303 standard.",
+    ))
+    return False
+
+
+def _check_expiry(expiry_str: Optional[str], reasons: List[ReasonCode], checks: List[ValidationCheckRecord]) -> bool:
+    is_doc_expired = False
+    if expiry_str:
+        try:
+            exp_date = datetime.strptime(str(expiry_str)[:10], "%Y-%m-%d").date()
+            if exp_date < date.today():
+                is_doc_expired = True
+        except Exception:
+            pass
+
+    if is_doc_expired:
+        reasons.append(ReasonCode(
+            code="DOCUMENT_EXPIRED",
+            message=f"Document validity expired on {expiry_str}.",
+            severity="HIGH",
+            contribution=0.25,
+        ))
+        checks.append(ValidationCheckRecord(
+            check_type="EXPIRY",
+            field_key="expiry_date",
+            status="FAIL",
+            is_hard_fail=False,
+            expected_value="FUTURE_DATE",
+            observed_value=str(expiry_str),
+            detail="Document validity period has expired.",
+        ))
+    elif expiry_str:
+        checks.append(ValidationCheckRecord(
+            check_type="EXPIRY",
+            field_key="expiry_date",
+            status="PASS",
+            is_hard_fail=False,
+            expected_value="FUTURE_DATE",
+            observed_value=str(expiry_str),
+            detail="Document is within validity period.",
+        ))
+    return is_doc_expired
 
 
 def evaluate_decision_matrix(
@@ -58,69 +125,13 @@ def evaluate_decision_matrix(
     watchlist_hits: List[WatchlistHitResult],
 ) -> DecisionOutcome:
     """Calculate weighted Score A and determine verification status and reason codes."""
-    hard_fail = False
     reasons: List[ReasonCode] = []
     checks: List[ValidationCheckRecord] = []
 
-    # -------------------------------------------------------------
-    # 1. Watchlist Screening Checks
-    # -------------------------------------------------------------
-    if watchlist_hits:
+    hard_fail = _check_watchlist(watchlist_hits, reasons, checks)
+    if extracted.mrz_result and _check_mrz(extracted.mrz_result, reasons, checks):
         hard_fail = True
-        for hit in watchlist_hits:
-            reasons.append(ReasonCode(
-                code=f"WATCHLIST_HIT_{hit.kind}",
-                message=f"Flagged on {hit.source} watchlist: {hit.reason}",
-                severity="CRITICAL",
-                contribution=1.0,
-            ))
-            checks.append(ValidationCheckRecord(
-                check_type="WATCHLIST_LOOKUP",
-                field_key="document_number",
-                status="FAIL",
-                is_hard_fail=True,
-                expected_value="NOT_ON_WATCHLIST",
-                observed_value=hit.kind,
-                detail=hit.reason,
-            ))
 
-    # -------------------------------------------------------------
-    # 2. MRZ Integrity & Checksum Checks
-    # -------------------------------------------------------------
-    if extracted.mrz_result:
-        mrz = extracted.mrz_result
-        if mrz.has_checksum_failure:
-            hard_fail = True
-            fail_desc = "; ".join(mrz.failure_details)
-            reasons.append(ReasonCode(
-                code="MRZ_CHECKSUM_FAILED",
-                message=f"MRZ check digit validation failed: {fail_desc}",
-                severity="CRITICAL",
-                contribution=0.8,
-            ))
-            checks.append(ValidationCheckRecord(
-                check_type="MRZ_CHECKSUM",
-                field_key="mrz",
-                status="FAIL",
-                is_hard_fail=True,
-                expected_value="VALID_CHECKSUM",
-                observed_value="INVALID",
-                detail=fail_desc,
-            ))
-        else:
-            checks.append(ValidationCheckRecord(
-                check_type="MRZ_CHECKSUM",
-                field_key="mrz",
-                status="PASS",
-                is_hard_fail=False,
-                expected_value="VALID_CHECKSUM",
-                observed_value="VALID",
-                detail="All MRZ check digits verified against ICAO 9303 standard.",
-            ))
-
-    # -------------------------------------------------------------
-    # 3. VIZ vs MRZ Cross-Check
-    # -------------------------------------------------------------
     if not extracted.viz_mrz_consistent:
         incon_desc = "; ".join(extracted.inconsistencies)
         reasons.append(ReasonCode(
@@ -139,257 +150,50 @@ def evaluate_decision_matrix(
             detail=incon_desc,
         ))
 
-    # -------------------------------------------------------------
-    # 4. Ground Truth Candidate Evaluation
-    # -------------------------------------------------------------
-    if not match.has_candidate:
+    expiry_str = (
+        match.candidate.expiry_date
+        if match and match.has_candidate and match.candidate and match.candidate.expiry_date
+        else extracted.claimed_expiry
+    )
+    is_doc_expired = _check_expiry(expiry_str, reasons, checks)
+
+    if match and match.has_candidate and match.candidate and not match.is_status_active:
+        hard_fail = True
         reasons.append(ReasonCode(
-            code="REGISTRY_RECORD_NOT_FOUND",
-            message="No matching document found in the civil/issuer registry.",
-            severity="HIGH",
-            contribution=0.5,
+            code=f"DOCUMENT_{match.candidate.status.upper()}",
+            message=f"Document is marked as {match.candidate.status} in issuer registry.",
+            severity="CRITICAL",
+            contribution=1.0,
         ))
         checks.append(ValidationCheckRecord(
             check_type="ISSUER_RULE",
-            field_key="document_number",
+            field_key="status",
             status="FAIL",
-            is_hard_fail=False,
-            expected_value="EXISTS_IN_REGISTRY",
-            observed_value="NOT_FOUND",
-            detail="Document number not registered in issuer database.",
+            is_hard_fail=True,
+            expected_value="ACTIVE",
+            observed_value=match.candidate.status,
+            detail=f"Registry status is {match.candidate.status}.",
         ))
-    else:
-        # Document status check
-        if not match.is_status_active:
-            hard_fail = True
-            reasons.append(ReasonCode(
-                code=f"DOCUMENT_{match.candidate.status.upper()}",
-                message=f"Document is marked as {match.candidate.status} in issuer registry.",
-                severity="CRITICAL",
-                contribution=1.0,
-            ))
-            checks.append(ValidationCheckRecord(
-                check_type="ISSUER_RULE",
-                field_key="status",
-                status="FAIL",
-                is_hard_fail=True,
-                expected_value="ACTIVE",
-                observed_value=match.candidate.status,
-                detail=f"Registry status is {match.candidate.status}.",
-            ))
 
-        # Expiry check
-        if match.is_expired:
-            reasons.append(ReasonCode(
-                code="DOCUMENT_EXPIRED",
-                message=f"Document expired on {match.candidate.expiry_date}.",
-                severity="HIGH",
-                contribution=0.25,
-            ))
-            checks.append(ValidationCheckRecord(
-                check_type="EXPIRY",
-                field_key="expiry_date",
-                status="FAIL",
-                is_hard_fail=False,
-                expected_value="FUTURE_DATE",
-                observed_value=match.candidate.expiry_date,
-                detail="Document validity period has expired.",
-            ))
-        else:
-            checks.append(ValidationCheckRecord(
-                check_type="EXPIRY",
-                field_key="expiry_date",
-                status="PASS",
-                is_hard_fail=False,
-                expected_value="FUTURE_DATE",
-                observed_value=match.candidate.expiry_date,
-                detail="Document is within validity period.",
-            ))
+    mrz_int = 0.0 if (extracted.mrz_result and extracted.mrz_result.has_checksum_failure) else (1.0 if extracted.document_number else 0.6)
+    cons_sc = 1.0 if extracted.viz_mrz_consistent else 0.35
+    val_sc = 0.0 if is_doc_expired else 1.0
+    comp_sc = (0.5 if extracted.document_number else 0.0) + (0.5 if extracted.claimed_name else 0.0)
 
-        # Check differences
-        for diff in match.differences:
-            if "Name mismatch" in diff:
-                reasons.append(ReasonCode(
-                    code="NAME_FUZZY_MISMATCH",
-                    message=diff,
-                    severity="MEDIUM",
-                    contribution=0.15,
-                ))
-
-    # -------------------------------------------------------------
-    # 5. Calculate Weighted Score A
-    # -------------------------------------------------------------
-    sub_scores = {
-        "id_match": match.id_score,
-        "name_match": match.name_score,
-        "dob_match": match.dob_score,
-        "validity": match.validity_score,
-    }
+    sub_scores = {"mrz_integrity": mrz_int, "viz_mrz_consistency": cons_sc, "validity": val_sc, "completeness": comp_sc}
 
     if hard_fail:
-        canonical_score = 0.0
-        status = "NOT VERIFIED"
-    elif not match.has_candidate:
-        canonical_score = 0.30  # OCR read the doc, but identity is unverified in DB
-        status = "NOT VERIFIED"
-    else:
-        # Weights: ID 35%, Name 30%, DOB 20%, Validity 15%
-        weighted = (
-            (0.35 * match.id_score) +
-            (0.30 * match.name_score) +
-            (0.20 * match.dob_score) +
-            (0.15 * match.validity_score)
-        )
+        canonical_score, status = 0.0, "NOT VERIFIED"
+    elif match and match.has_candidate and match.candidate:
+        weighted = (0.35 * match.id_score) + (0.30 * match.name_score) + (0.20 * match.dob_score) + (0.15 * match.validity_score)
         canonical_score = round(max(0.0, min(1.0, weighted)), 4)
-
-        if canonical_score >= 0.85:
-            status = "VERIFIED"
-        elif canonical_score >= 0.60:
-            status = "NEEDS REVIEW"
-        else:
-            status = "NOT VERIFIED"
-
-    score_100 = round(canonical_score * 100.0, 2)
+        status = "VERIFIED" if canonical_score >= 0.85 else ("NEEDS REVIEW" if canonical_score >= 0.60 else "NOT VERIFIED")
+    else:
+        weighted = (0.35 * mrz_int) + (0.35 * cons_sc) + (0.20 * val_sc) + (0.10 * comp_sc)
+        canonical_score = round(max(0.0, min(1.0, weighted)), 4)
+        status = "VERIFIED" if canonical_score >= 0.85 else ("NEEDS REVIEW" if canonical_score >= 0.60 else "NOT VERIFIED")
 
     return DecisionOutcome(
-        status=status,
-        score=score_100,
-        canonical_score=canonical_score,
-        hard_fail=hard_fail,
-        reason_codes=reasons,
-        validation_checks=checks,
-        sub_scores=sub_scores,
+        status=status, score=round(canonical_score * 100.0, 2), canonical_score=canonical_score,
+        hard_fail=hard_fail, reason_codes=reasons, validation_checks=checks, sub_scores=sub_scores,
     )
-
-
-def _validate_field_formats(doc: ParsedDocumentData) -> List[ValidationCheckRecord]:
-    """Validate format and semantics of extracted fields for cross-document consistency."""
-    import datetime
-    checks: List[ValidationCheckRecord] = []
-
-    # 1. Name check
-    if doc.claimed_name and len(doc.claimed_name.strip()) >= 2:
-        checks.append(ValidationCheckRecord(
-            check_type="FIELD_FORMAT",
-            field_key="name",
-            status="PASS",
-            is_hard_fail=False,
-            expected_value="NON_EMPTY",
-            observed_value=doc.claimed_name,
-            detail="Name is formatted correctly.",
-        ))
-    else:
-        checks.append(ValidationCheckRecord(
-            check_type="FIELD_FORMAT",
-            field_key="name",
-            status="FAIL",
-            is_hard_fail=False,
-            expected_value="NON_EMPTY",
-            observed_value=doc.claimed_name,
-            detail="Name is missing or invalid.",
-        ))
-
-    # 2. DOB check
-    if doc.claimed_dob:
-        try:
-            dob_dt = datetime.date.fromisoformat(doc.claimed_dob)
-            if dob_dt > datetime.date.today():
-                checks.append(ValidationCheckRecord(
-                    check_type="FIELD_FORMAT",
-                    field_key="dob",
-                    status="FAIL",
-                    is_hard_fail=False,
-                    expected_value="PAST_DATE",
-                    observed_value=doc.claimed_dob,
-                    detail="Date of birth cannot be in the future.",
-                ))
-            else:
-                checks.append(ValidationCheckRecord(
-                    check_type="FIELD_FORMAT",
-                    field_key="dob",
-                    status="PASS",
-                    is_hard_fail=False,
-                    expected_value="PAST_DATE",
-                    observed_value=doc.claimed_dob,
-                    detail="Date of birth is valid.",
-                ))
-        except ValueError:
-            checks.append(ValidationCheckRecord(
-                check_type="FIELD_FORMAT",
-                field_key="dob",
-                status="FAIL",
-                is_hard_fail=False,
-                expected_value="YYYY-MM-DD",
-                observed_value=doc.claimed_dob,
-                detail="Date of birth has invalid format.",
-            ))
-    else:
-        checks.append(ValidationCheckRecord(
-            check_type="FIELD_FORMAT",
-            field_key="dob",
-            status="WARN",
-            is_hard_fail=False,
-            expected_value="YYYY-MM-DD",
-            observed_value=None,
-            detail="Date of birth is missing.",
-        ))
-
-    # 3. Document number check
-    if doc.document_number and len(doc.document_number.strip()) >= 3:
-        checks.append(ValidationCheckRecord(
-            check_type="FIELD_FORMAT",
-            field_key="document_number",
-            status="PASS",
-            is_hard_fail=False,
-            expected_value="VALID_ID",
-            observed_value=doc.document_number,
-            detail="Document number is formatted correctly.",
-        ))
-    else:
-        checks.append(ValidationCheckRecord(
-            check_type="FIELD_FORMAT",
-            field_key="document_number",
-            status="FAIL",
-            is_hard_fail=False,
-            expected_value="VALID_ID",
-            observed_value=doc.document_number,
-            detail="Document number is missing or too short.",
-        ))
-
-    # 4. Expiry check
-    if doc.claimed_expiry:
-        try:
-            datetime.date.fromisoformat(doc.claimed_expiry)
-            checks.append(ValidationCheckRecord(
-                check_type="FIELD_FORMAT",
-                field_key="expiry",
-                status="PASS",
-                is_hard_fail=False,
-                expected_value="DATE",
-                observed_value=doc.claimed_expiry,
-                detail="Expiry date format is valid.",
-            ))
-        except ValueError:
-            checks.append(ValidationCheckRecord(
-                check_type="FIELD_FORMAT",
-                field_key="expiry",
-                status="FAIL",
-                is_hard_fail=False,
-                expected_value="DATE",
-                observed_value=doc.claimed_expiry,
-                detail="Expiry date format is invalid.",
-            ))
-    else:
-        checks.append(ValidationCheckRecord(
-            check_type="FIELD_FORMAT",
-            field_key="expiry",
-            status="WARN",
-            is_hard_fail=False,
-            expected_value="DATE",
-            observed_value=None,
-            detail="Expiry date is missing.",
-        ))
-
-    return checks
-
-

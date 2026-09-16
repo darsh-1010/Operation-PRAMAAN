@@ -44,7 +44,17 @@ export interface ModuleResponse {
   score: number
   hard_fail: boolean
   reason_codes: string[]
+  latency_ms?: number
+  details?: {
+    claimed_name?: string | null
+    document_number?: string | null
+    doc_type?: string | null
+    mrz_valid?: boolean
+    extracted_fields?: Array<{ field_key: string; field_value: string; source: string; confidence: number }>
+    validation_checks?: Array<{ check_type: string; status: string; detail: string; field_key?: string }>
+  }
 }
+
 
 function isModuleResponse(body: unknown): body is ModuleResponse {
   if (typeof body !== 'object' || body === null) return false

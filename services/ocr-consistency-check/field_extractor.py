@@ -1,14 +1,20 @@
-"""Field Extraction and Document Parser.
-
-Extracts structured fields (Name, DOB, ID number, Expiry, Gender, Country)
-from OCR text blocks using regex patterns, label anchoring, and MRZ cross-checking.
-"""
+"""Field Extraction and Document Parser."""
 
 from __future__ import annotations
 import re
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from field_patterns import (
+    BLACKLIST,
+    COLUMN_HEADER,
+    HEADER_MARKERS,
+    LABEL_TAGS,
+    STOP_MARKERS,
+    ExtractedField,
+    ParsedDocumentData,
+    detect_document_type,
+    extract_regex_value,
+)
 from mrz_verifier import MRZCheckResult, extract_and_verify_mrz
 from nepali_calendar import convert_bikram_sambat
 from normalizer import normalize_date, normalize_gender, normalize_id_number, normalize_name
@@ -16,217 +22,165 @@ from ocr_engine import OCRResult, TextBlock
 from script_detector import detect_script_and_language
 
 
-@dataclass
-class ExtractedField:
-    """Individual extracted field for database persistence."""
-    field_key: str
-    field_value: Optional[str]
-    source: str  # 'VIZ', 'MRZ', or 'BARCODE'
-    confidence: float
-    bbox: Optional[Dict[str, float]] = None
-
-
-@dataclass
-class ParsedDocumentData:
-    """Consolidated document fields ready for consistency verification."""
-    doc_type: str  # 'PASSPORT', 'NATIONAL_ID', 'DRIVING_LICENSE', etc.
-    document_number: Optional[str] = None
-    claimed_name: Optional[str] = None
-    claimed_dob: Optional[str] = None
-    claimed_expiry: Optional[str] = None
-    claimed_gender: Optional[str] = None
-    issuing_country: Optional[str] = "IND"
-    fields: List[ExtractedField] = field(default_factory=list)
-    mrz_result: Optional[MRZCheckResult] = None
-    viz_mrz_consistent: bool = True
-    inconsistencies: List[str] = field(default_factory=list)
-    detected_language: str = "English"
-    detected_script: str = "Latin"
-    claimed_dob_bs: Optional[str] = None
-    calendar_system: str = "GREGORIAN"
-
-
-def detect_document_type(full_text: str) -> str:
-    """Infer document type from text tokens across English and regional scripts."""
-    upper = full_text.upper()
-    if "PASSPORT" in upper or "राहदानी" in full_text or ("REPUBLIC OF INDIA" in upper and "PASSPORT" in upper):
-        return "PASSPORT"
-    if "DRIVING" in upper or "LICENCE" in upper or "LICENSE" in upper or "चालक अनुमतिपत्र" in full_text or "सवारी चालक" in full_text:
-        return "DRIVING_LICENSE"
-    if (
-        "AADHAAR" in upper
-        or "UNIQUE IDENTIFICATION" in upper
-        or "PAN CARD" in upper
-        or "नागरिकता" in full_text
-        or "CITIZENSHIP" in upper
-    ):
-        return "NATIONAL_ID"
-    if "VISA" in upper or "भिसा" in full_text:
-        return "VISA"
-    return "NATIONAL_ID"
-
-
-def extract_labeled_field(lines: List[str], label_pattern: str, max_lookahead: int = 2) -> Optional[str]:
-    """Find a value adjacent to or on the line following a field label."""
+def extract_labeled_field(
+    lines: List[str], label_pattern: str, max_lookahead: int = 3, disallowed_preceding: Optional[str] = None
+) -> Optional[str]:
+    """Find a value adjacent to or on the line following a field label, ignoring header junk."""
     for idx, line in enumerate(lines):
-        match = re.search(label_pattern, line, re.IGNORECASE)
-        if match:
-            # Check if value is on the same line after a colon or space
-            remainder = line[match.end():].strip().lstrip(":").strip()
-            if len(remainder) >= 2 and not re.search(r"^(OF|AND|THE|NO|को|नं)\b", remainder, re.I):
+        for match in re.finditer(label_pattern, line, re.IGNORECASE):
+            preceding_text = line[:match.start()].strip()
+            if disallowed_preceding and preceding_text and re.search(disallowed_preceding, preceding_text, re.IGNORECASE):
+                continue
+
+            remainder = line[match.end():].strip()
+            remainder = re.sub(r"^\([a-zA-Z\s]{1,4}\)", "", remainder).strip().lstrip(":/-").strip()
+
+            while True:
+                rem_clean = remainder.lstrip(":/-–— \t").strip()
+                m_label = LABEL_TAGS.search(rem_clean)
+                if m_label and m_label.end() > 0:
+                    remainder = rem_clean[m_label.end():].strip()
+                else:
+                    break
+
+            if COLUMN_HEADER.search(remainder):
+                remainder = ""
+
+            if len(remainder) >= 2 and not LABEL_TAGS.search(remainder) and not re.search(r"^(OF|AND|THE|NO|को|नं|CONTROL\s*NUMBER)\b", remainder, re.I) and re.search(r"[A-Za-z0-9\u0900-\u097F]", remainder):
                 return remainder
-            # Look at next line(s)
+
             for offset in range(1, max_lookahead + 1):
                 if idx + offset < len(lines):
-                    candidate = lines[idx + offset].strip()
-                    if candidate and not re.search(r"(NAME|DOB|DATE|SEX|PASSPORT|NUMBER|EXPIRY|नाम|मिति|लिंग)", candidate, re.I):
-                        return candidate
+                    cand = lines[idx + offset].strip().lstrip(":/-").strip()
+                    if not cand or len(cand) < 2:
+                        continue
+                    hdrs = COLUMN_HEADER.findall(cand)
+                    words = cand.split()
+                    if hdrs and (len(words) <= 3 or len(hdrs) >= max(1, len(words) // 2)):
+                        continue
+                    if not LABEL_TAGS.search(cand) and not re.search(r"(NAME|DOB|DATE|SEX|PASSPORT|NUMBER|EXPIRY|नाम|मिति|लिंग|CONTROL\s*NUMBER)", cand, re.I) and re.search(r"[A-Za-z0-9\u0900-\u097F]", cand):
+                        clean_cand = re.split(r"\b(VISA|TYPE|CLASS|SEX|BIRTH|EXP|DATE|R\s*K[-0-9]?)\b", cand, flags=re.I)[0].strip()
+                        clean_cand = re.sub(r"^[^A-Za-z0-9\u0900-\u097F]+", "", clean_cand).strip()
+                        return clean_cand if len(clean_cand) >= 2 else cand
     return None
 
 
-def extract_regex_value(full_text: str, pattern: str) -> Optional[str]:
-    """Search for first match of a regex pattern across full text."""
-    match = re.search(pattern, full_text, re.MULTILINE | re.IGNORECASE)
-    return match.group(1).strip() if match else None
+def _is_valid_name_line(cand: str) -> bool:
+    if not cand or BLACKLIST.search(cand) or HEADER_MARKERS.search(cand):
+        return False
+    words = cand.split()
+    return (1 <= len(words) <= 4 and all(re.match(r"^[A-Za-z]+$", w) and len(w) >= 2 for w in words)
+            and not any(w.upper() in ("INDIA", "GOVERNMENT", "MALE", "FEMALE", "YEAR", "BIRTH", "ENROLMENT", "CARD", "AUTHORITY", "UNIQUE") for w in words))
+
+
+def _extract_positional_national_id_name(lines: List[str]) -> Optional[str]:
+    """Positional extraction for Aadhaar and standard National IDs without an explicit 'NAME:' label."""
+    dob_idx = next((i for i, l in enumerate(lines) if re.search(r"\b(DOB|D\.O\.B|DATE\s*OF\s*BIRTH|YEAR\s*OF\s*BIRTH|जन्म)\b", l, re.I)), -1)
+    if dob_idx > 0:
+        for offset in range(1, min(4, dob_idx + 1)):
+            cand = lines[dob_idx - offset].strip()
+            if _is_valid_name_line(cand):
+                return cand
+
+    header_idx = next((i for i, l in enumerate(lines) if HEADER_MARKERS.search(l)), -1)
+    stop_idx = next((i for i, l in enumerate(lines) if STOP_MARKERS.search(l)), len(lines))
+    for i in range(max(0, header_idx + 1), min(stop_idx, len(lines))):
+        if _is_valid_name_line(lines[i].strip()):
+            return lines[i].strip()
+    return None
 
 
 def extract_document_fields(
-    ocr_result: OCRResult,
-    expected_country: Optional[str] = None,
-    expected_language: Optional[str] = None,
+    ocr_result: OCRResult, expected_country: Optional[str] = None, expected_language: Optional[str] = None
 ) -> ParsedDocumentData:
     """Orchestrate extraction across MRZ, VIZ, and regional language/calendar formats."""
-    lines = ocr_result.lines
-    full_text = ocr_result.full_text
+    lines, full_text = ocr_result.lines, ocr_result.full_text
     fields_list: List[ExtractedField] = []
-
-    # Step 0: Language and script classification (drives label anchors + calendar handling below)
     lang_info = detect_script_and_language(full_text, expected_country, expected_language)
 
-    # Step 1: Detect and verify MRZ if present
     mrz = extract_and_verify_mrz(lines)
     doc_type = mrz.doc_type if (mrz and mrz.valid_format) else detect_document_type(full_text)
 
-    # Step 2: Extract VIZ fields, with regional label anchors alongside the English ones
-    viz_name_raw = extract_labeled_field(lines, r"\b(GIVEN\s*NAME[S]?|NAME|SURNAME|FULL\s*NAME|नाम|नाम,\s*थर|थर)\b")
-    viz_dob_raw = extract_labeled_field(
-        lines, r"\b(DATE\s*OF\s*BIRTH|DOB|D\.O\.B|BIRTH\s*DATE|जन्म\s*मिति|जन्म\s*तिथि|वि\.सं\.?)\b"
-    )
-    viz_exp_raw = extract_labeled_field(
-        lines, r"\b(DATE\s*OF\s*EXPIRY|EXPIRY\s*DATE|VALID\s*UNTIL|EXP|म्याद|अवधि|बहाल\s*रहने\s*अवधि)\b"
-    )
-    viz_sex_raw = extract_labeled_field(lines, r"\b(SEX|GENDER|लिंग)\b")
-
-    # Document number regexes based on type
-    doc_num_raw: Optional[str] = None
-    if doc_type == "PASSPORT":
-        doc_num_raw = extract_regex_value(full_text, r"\b([A-PR-WY][0-9]{7,8})\b")
-    elif doc_type == "DRIVING_LICENSE":
-        doc_num_raw = extract_regex_value(full_text, r"\b([A-Z]{2}[-\s]?[0-9]{2}[-\s]?[0-9]{7,11})\b")
-    elif doc_type == "NATIONAL_ID":
-        doc_num_raw = extract_regex_value(full_text, r"\b([0-9]{4}\s?[0-9]{4}\s?[0-9]{4})\b")
-
-    if not doc_num_raw:
-        doc_num_raw = extract_labeled_field(lines, r"\b(PASSPORT\s*NO|DOC\s*NO|ID\s*NO|NUMBER)\b")
-
-    # Step 3: Normalize VIZ fields
-    norm_name = normalize_name(viz_name_raw) if (viz_name_raw and re.search(r"[A-Za-z]", viz_name_raw)) else (
-        viz_name_raw.strip() if viz_name_raw else None
-    )
-    norm_exp = normalize_date(viz_exp_raw)
-    norm_sex = normalize_gender(viz_sex_raw)
-    norm_doc_num = normalize_id_number(doc_num_raw)
-
-    # Nepali Bikram Sambat (B.S.) date handling: DOB printed in BS, not Gregorian
-    claimed_dob_bs: Optional[str] = None
-    calendar_system = "GREGORIAN"
-    is_nepali_doc = (
-        expected_country == "NPL"
-        or lang_info.language_code == "nep"
-        or bool(
-            viz_dob_raw
-            and re.search(
-                r"[०-९]|(वि\.?सं\.?|B\.?S\.?|बैशाख|जेठ|असार|साउन|भदौ|असोज|कात्तिक|मंसिर|पुष|माघ|फागुन|चैत)",
-                viz_dob_raw,
-            )
-        )
-    )
-
-    if is_nepali_doc and viz_dob_raw:
-        cal_res = convert_bikram_sambat(viz_dob_raw)
-        if cal_res.is_valid and cal_res.gregorian_date:
-            norm_dob = cal_res.gregorian_date
-            claimed_dob_bs = viz_dob_raw
-            calendar_system = "BIKRAM_SAMBAT"
-        else:
-            norm_dob = normalize_date(viz_dob_raw)
+    viz_surname = extract_labeled_field(lines, r"\b(SURNAME|LAST\s*NAME|उपनाम|थर|APELLIDOS?)\b", disallowed_preceding=r"(POST|FATHER|MOTHER|SPOUSE|HUSBAND)\b")
+    viz_given = extract_labeled_field(lines, r"\b(GIVEN\s*NAME(\([sS]\)|S)?|FIRST\s*NAME|दिए\s*गए\s*नाम|PRENOMS?)\b", disallowed_preceding=r"(POST|FATHER|MOTHER|SPOUSE|HUSBAND)\b")
+    if viz_surname and viz_given:
+        viz_name_raw = f"{viz_surname} {viz_given}"
+    elif viz_surname or viz_given:
+        viz_name_raw = viz_surname or viz_given
     else:
-        norm_dob = normalize_date(viz_dob_raw)
+        viz_name_raw = extract_labeled_field(lines, r"\b(FULL\s*NAME|NAME|नाम|नाम,\s*थर)\b", disallowed_preceding=r"(POST|ISSUING\s*POST|FATHER['’]?S?|MOTHER['’]?S?|SPOUSE['’]?S?|HUSBAND['’]?S?|BANK|BRANCH|PLACE|CITY|STATE|DISTRICT|CARD|FILE)\b")
 
-    # Step 4: Reconcile with MRZ (MRZ takes precedence for travel docs, but cross-checks VIZ)
-    inconsistencies: List[str] = []
-    final_name = norm_name
-    final_dob = norm_dob
-    final_exp = norm_exp
-    final_sex = norm_sex
-    final_doc_num = norm_doc_num
-    country = expected_country or ("NPL" if is_nepali_doc else "IND")
+    if not viz_name_raw and doc_type == "NATIONAL_ID":
+        viz_name_raw = _extract_positional_national_id_name(lines)
+
+    viz_dob_raw = extract_labeled_field(lines, r"\b(DATE\s*OF\s*BIRTH|DOB|D\.O\.B|BIRTH\s*DATE|जन्म\s*मिति|जन्म\s*तिथि|वि\.सं\.?)\b")
+    viz_exp_raw = extract_labeled_field(lines, r"\b(DATE\s*OF\s*EXPIRY|EXPIRY\s*DATE|VALID\s*UNTIL|EXP|म्याद|अवधि|बहाल\s*रहने\s*अवधि)\b")
+    viz_sex_raw = extract_labeled_field(lines, r"\b(SEX|GENDER|लिंग)\b")
+    if not viz_sex_raw:
+        for line in lines:
+            m_gen = re.search(r"\b(MALE|FEMALE|पुरुष|महिला)\b", line, re.I)
+            if m_gen:
+                viz_sex_raw = m_gen.group(1)
+                break
+
+    # Document Number regexes
+    viz_id_raw = (
+        extract_regex_value(full_text, r"\b([A-PR-WY][0-9O]{7,8})\b") if doc_type in ("PASSPORT", "VISA")
+        else (extract_regex_value(full_text, r"\b([0-9]{4}\s+[0-9]{4}\s+[0-9]{4})\b") or extract_regex_value(full_text, r"\b([A-Z]{5}[0-9]{4}[A-Z])\b") or extract_regex_value(full_text, r"\b([0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{4,5})\b"))
+    ) or extract_labeled_field(lines, r"\b(PASSPORT\s*(?:NO\.?|NUMBER)|VISA\s*(?:NO\.?|NUMBER)|ID\s*(?:NO\.?|NUMBER)|DOCUMENT\s*(?:NO\.?|NUMBER)|LICEN[SC]E\s*(?:NO\.?|NUMBER)|नम्बर|नं)\b", disallowed_preceding=r"(POST|ISSUING|CONTROL|BATCH|PHONE)\b")
+
+    viz_name = normalize_name(viz_name_raw) if viz_name_raw else None
+    viz_dob, viz_dob_bs, calendar_sys = (None, None, "GREGORIAN")
+    if viz_dob_raw:
+        has_bs = bool(re.search(r"(B\.?S\.?|VI\.?SAM\.?|वि\.?सं\.?)", viz_dob_raw, re.I) or expected_country == "NPL")
+        norm = normalize_date(viz_dob_raw) if not has_bs else None
+        if norm:
+            viz_dob = norm
+        else:
+            bs = convert_bikram_sambat(viz_dob_raw)
+            if bs and bs.is_valid and bs.gregorian_date:
+                viz_dob, viz_dob_bs, calendar_sys = bs.gregorian_date, bs.raw_input, "BIKRAM_SAMBAT"
+            else:
+                viz_dob = normalize_date(viz_dob_raw)
+    viz_exp = normalize_date(viz_exp_raw) if viz_exp_raw else None
+    viz_gender = normalize_gender(viz_sex_raw) if viz_sex_raw else None
+    viz_id = normalize_id_number(viz_id_raw) if viz_id_raw else None
+
+    for k, v in [("NAME", viz_name), ("DOB", viz_dob), ("EXPIRY", viz_exp), ("GENDER", viz_gender), ("DOCUMENT_NUMBER", viz_id)]:
+        if v:
+            fields_list.append(ExtractedField(k, v, "VIZ", 0.90))
 
     if mrz and mrz.valid_format:
-        country = expected_country or mrz.issuing_country or "IND"
-        if mrz.document_number:
-            if norm_doc_num and norm_doc_num != mrz.document_number:
-                inconsistencies.append(f"Doc number mismatch: VIZ '{norm_doc_num}' vs MRZ '{mrz.document_number}'")
-            final_doc_num = mrz.document_number
-            fields_list.append(ExtractedField("document_number", mrz.document_number, "MRZ", 0.99))
+        for k, v in [("NAME", mrz.full_name), ("DOB", mrz.dob), ("EXPIRY", mrz.expiry), ("GENDER", mrz.gender), ("DOCUMENT_NUMBER", mrz.document_number)]:
+            if v:
+                fields_list.append(ExtractedField(k, v, "MRZ", 0.99 if not mrz.has_checksum_failure else 0.70))
 
+    inconsistencies = []
+    final_name, final_id = viz_name, viz_id
+    if mrz and mrz.valid_format:
+        if mrz.document_number and viz_id and mrz.document_number != viz_id:
+            inconsistencies.append(f"Doc Number mismatch: VIZ '{viz_id}' vs MRZ '{mrz.document_number}'")
+        final_id = mrz.document_number or viz_id
         if mrz.full_name:
-            if norm_name and norm_name != mrz.full_name:
-                inconsistencies.append(f"Name mismatch: VIZ '{norm_name}' vs MRZ '{mrz.full_name}'")
-            final_name = mrz.full_name if not norm_name else norm_name
-            fields_list.append(ExtractedField("name", mrz.full_name, "MRZ", 0.98))
+            if viz_name and mrz.full_name != viz_name:
+                from matcher import compute_fuzzy_name_score
+                if compute_fuzzy_name_score(viz_name, mrz.full_name) >= 0.85:
+                    final_name = viz_name
+                else:
+                    inconsistencies.append(f"Name mismatch: VIZ '{viz_name}' vs MRZ '{mrz.full_name}'")
+                    final_name = mrz.full_name
+            else:
+                final_name = viz_name or mrz.full_name
 
-        if mrz.dob:
-            if norm_dob and norm_dob != mrz.dob:
-                inconsistencies.append(f"DOB mismatch: VIZ '{norm_dob}' vs MRZ '{mrz.dob}'")
-            final_dob = mrz.dob
-            fields_list.append(ExtractedField("dob", mrz.dob, "MRZ", 0.99))
-
-        if mrz.expiry:
-            final_exp = mrz.expiry
-            fields_list.append(ExtractedField("expiry", mrz.expiry, "MRZ", 0.99))
-
-        if mrz.gender:
-            final_sex = mrz.gender
-            fields_list.append(ExtractedField("gender", mrz.gender, "MRZ", 0.99))
-
-    # Add VIZ fields to fields list
-    if norm_name:
-        fields_list.append(ExtractedField("name", norm_name, "VIZ", 0.90))
-    if norm_dob:
-        fields_list.append(ExtractedField("dob", norm_dob, "VIZ", 0.90))
-    if norm_exp:
-        fields_list.append(ExtractedField("expiry", norm_exp, "VIZ", 0.90))
-    if norm_doc_num:
-        fields_list.append(ExtractedField("document_number", norm_doc_num, "VIZ", 0.92))
-    if norm_sex:
-        fields_list.append(ExtractedField("gender", norm_sex, "VIZ", 0.90))
+    final_dob = (mrz.dob if (mrz and mrz.dob) else viz_dob)
+    final_exp = (mrz.expiry if (mrz and mrz.expiry) else viz_exp)
+    final_gen = (mrz.gender if (mrz and mrz.gender) else viz_gender)
 
     return ParsedDocumentData(
-        doc_type=doc_type,
-        document_number=final_doc_num,
-        claimed_name=final_name,
-        claimed_dob=final_dob,
-        claimed_expiry=final_exp,
-        claimed_gender=final_sex,
-        issuing_country=country,
-        fields=fields_list,
-        mrz_result=mrz,
-        viz_mrz_consistent=(len(inconsistencies) == 0),
-        inconsistencies=inconsistencies,
-        detected_language=lang_info.language_name,
-        detected_script=lang_info.detected_script,
-        claimed_dob_bs=claimed_dob_bs,
-        calendar_system=calendar_system,
+        doc_type=doc_type, document_number=final_id, claimed_name=final_name,
+        claimed_dob=final_dob, claimed_expiry=final_exp, claimed_gender=final_gen,
+        issuing_country=mrz.issuing_country if (mrz and mrz.issuing_country) else "IND",
+        fields=fields_list, mrz_result=mrz, viz_mrz_consistent=(len(inconsistencies) == 0),
+        inconsistencies=inconsistencies, detected_language=lang_info.language_name,
+        detected_script=lang_info.detected_script, claimed_dob_bs=viz_dob_bs, calendar_system=calendar_sys,
     )
-

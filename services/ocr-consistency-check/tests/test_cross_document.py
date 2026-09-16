@@ -65,6 +65,22 @@ class TestCrossDocumentConsistency(unittest.TestCase):
         outcome = cross_check_documents(docs)
         self.assertTrue(outcome.consistent)
 
+    def test_gender_unknown_x_tolerated(self):
+        docs = [
+            ParsedDocumentData(doc_type="PASSPORT", claimed_name="AAYUSH AJIT", claimed_dob="2004-07-09", claimed_gender="M"),
+            ParsedDocumentData(doc_type="DRIVING_LICENSE", claimed_name="AAYUSH AJIT", claimed_dob="2004-07-09", claimed_gender="X"),
+        ]
+        outcome = cross_check_documents(docs)
+        self.assertTrue(outcome.consistent)
+
+    def test_gender_mismatch_flagged(self):
+        docs = [
+            ParsedDocumentData(doc_type="PASSPORT", claimed_name="AAYUSH AJIT", claimed_dob="2004-07-09", claimed_gender="M"),
+            ParsedDocumentData(doc_type="DRIVING_LICENSE", claimed_name="AAYUSH AJIT", claimed_dob="2004-07-09", claimed_gender="F"),
+        ]
+        outcome = cross_check_documents(docs)
+        self.assertFalse(outcome.consistent)
+
 
 class TestFieldFormatValidation(unittest.TestCase):
     def test_valid_fields_pass(self):

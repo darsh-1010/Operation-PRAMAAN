@@ -47,11 +47,19 @@ def _compare_names(names: List[Optional[str]]) -> CrossDocFieldResult:
 
 
 def _compare_exact(field_key: str, values: List[Optional[str]], label: str) -> CrossDocFieldResult:
-    """Exact-compare a field (e.g. DOB, gender) across documents."""
-    present = [v for v in values if v]
+    """Exact-compare a field (e.g. DOB) across documents."""
+    present = [v for v in values if v and v != "—"]
     consistent = len(set(present)) <= 1
     detail = f"{label} consistent across documents." if consistent else f"{label} differs across documents."
     return CrossDocFieldResult(field_key, consistent, [v or "—" for v in values], detail)
+
+
+def _compare_gender(values: List[Optional[str]]) -> CrossDocFieldResult:
+    """Compare gender across documents; ignore unparsed/unknown 'X' unless conflicting M vs F."""
+    known = [v.upper() for v in values if v and v.upper() in ("M", "F")]
+    consistent = len(set(known)) <= 1
+    detail = "Gender consistent across documents." if consistent else "Gender differs across documents."
+    return CrossDocFieldResult("gender", consistent, [v or "—" for v in values], detail)
 
 
 def cross_check_documents(documents: List[ParsedDocumentData]) -> CrossDocumentOutcome:
@@ -59,7 +67,7 @@ def cross_check_documents(documents: List[ParsedDocumentData]) -> CrossDocumentO
     results = [
         _compare_names([d.claimed_name for d in documents]),
         _compare_exact("dob", [d.claimed_dob for d in documents], "Date of birth"),
-        _compare_exact("gender", [d.claimed_gender for d in documents], "Gender"),
+        _compare_gender([d.claimed_gender for d in documents]),
     ]
     outcome = CrossDocumentOutcome(consistent=all(r.consistent for r in results), field_results=results)
     if not outcome.consistent:

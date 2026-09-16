@@ -26,29 +26,17 @@ NEPALI_MONTH_NAMES = {
 
 # Lookup for both Devanagari and Latin variations of Nepali month names
 NEPALI_MONTH_MAP: Dict[str, int] = {
-    # 1. Baishakh (~ mid Apr - mid May)
     "बैशाख": 1, "वैशाख": 1, "BAISHAKH": 1, "BAISAKH": 1, "VAISHAKH": 1, "BAISAK": 1,
-    # 2. Jestha (~ mid May - mid Jun)
     "जेठ": 2, "ज्येष्ठ": 2, "जेष्ठ": 2, "JESTHA": 2, "JETH": 2, "JYESHTHA": 2, "JESTA": 2,
-    # 3. Ashadh (~ mid Jun - mid Jul)
     "असार": 3, "आषाढ": 3, "अषाढ": 3, "ASHADH": 3, "ASAR": 3, "AASHADH": 3, "ASADH": 3,
-    # 4. Shrawan (~ mid Jul - mid Aug)
     "साउन": 4, "श्रावण": 4, "SHRAWAN": 4, "SAUN": 4, "SRAWAN": 4, "SHRAVAN": 4,
-    # 5. Bhadra (~ mid Aug - mid Sep)
     "भदौ": 5, "भाद्र": 5, "BHADRA": 5, "BHAU": 5, "BHADO": 5, "BHADRAPAD": 5,
-    # 6. Ashwin (~ mid Sep - mid Oct)
     "असोज": 6, "आश्विन": 6, "आसोज": 6, "ASHWIN": 6, "ASOJ": 6, "AASHOJ": 6, "ASWIN": 6,
-    # 7. Kartik (~ mid Oct - mid Nov)
     "कात्तिक": 7, "कार्तिक": 7, "KARTIK": 7, "KATTIK": 7, "KARTIKA": 7,
-    # 8. Mangsir (~ mid Nov - mid Dec)
     "मंसिर": 8, "मार्गशीर्ष": 8, "मंगसिर": 8, "MANGSIR": 8, "MARGASHIRSHA": 8, "MANGSHIR": 8,
-    # 9. Poush (~ mid Dec - mid Jan)
     "पुष": 9, "पौष": 9, "POUSH": 9, "PAUSH": 9, "PUSH": 9,
-    # 10. Magh (~ mid Jan - mid Feb)
     "माघ": 10, "MAGH": 10, "MAGHA": 10,
-    # 11. Falgun (~ mid Feb - mid Mar)
     "फागुन": 11, "फाल्गुन": 11, "FALGUN": 11, "PHAGUN": 11, "FALGUNA": 11, "PHALGUNA": 11,
-    # 12. Chaitra (~ mid Mar - mid Apr)
     "चैत": 12, "चैत्र": 12, "CHAITRA": 12, "CHAIT": 12,
 }
 

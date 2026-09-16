@@ -19,7 +19,7 @@ MONTH_MAP = {
     "NOV": 11, "NOVEMBER": 11, "DEC": 12, "DECEMBER": 12,
 }
 
-HONORIFICS = {"MR", "MRS", "MS", "DR", "PROF", "SHRI", "SMT", "KUMAR", "MISS"}
+HONORIFICS = {"MR", "MRS", "MS", "DR", "PROF", "SHRI", "SMT", "MISS"}
 
 
 def normalize_date(date_str: Optional[str]) -> Optional[str]:
@@ -127,5 +127,11 @@ def normalize_bikram_sambat_date(bs_str: Optional[str]) -> Optional[str]:
         return res.gregorian_date if res.is_valid else None
     except Exception:
         return None
+
+
+def compute_name_similarity(name1: Optional[str], name2: Optional[str]) -> float:
+    """Compute fuzzy similarity ratio between two names."""
+    from matcher import compute_fuzzy_name_score
+    return compute_fuzzy_name_score(name1, name2)
 
 

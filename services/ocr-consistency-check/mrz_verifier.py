@@ -1,311 +1,172 @@
-"""ICAO Doc 9303 Machine Readable Zone (MRZ) Verifier and Parser.
-
-Implements international standards for travel document MRZ validation,
-supporting TD3 (2x44 Passports) and TD1 (3x30 ID Cards).
-Calculates modulo-10 weighted check digits (weights: 7, 3, 1) and validates
-integrity to detect document tampering or fraudulent alterations.
-"""
+"""ICAO Doc 9303 Machine Readable Zone (MRZ) Verifier and Parser."""
 
 from __future__ import annotations
-import datetime
 import re
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-ICAO_WEIGHTS = [7, 3, 1]
-
-
-def icao_char_value(c: str) -> int:
-    """Convert an MRZ character to its ICAO 9303 numeric value."""
-    if c == "<":
-        return 0
-    if "0" <= c <= "9":
-        return int(c)
-    if "A" <= c <= "Z":
-        return ord(c) - ord("A") + 10
-    return 0
-
-
-def calculate_mrz_checksum(data: str) -> int:
-    """Calculate ICAO Doc 9303 check digit using repeating weights 7, 3, 1."""
-    total = 0
-    for idx, char in enumerate(data):
-        weight = ICAO_WEIGHTS[idx % len(ICAO_WEIGHTS)]
-        total += icao_char_value(char) * weight
-    return total % 10
-
-
-def parse_mrz_date(yymmdd: str, is_dob: bool = False) -> Optional[str]:
-    """Parse a 6-digit MRZ date into ISO standard YYYY-MM-DD."""
-    if len(yymmdd) != 6 or not yymmdd.isdigit():
-        return None
-    yy, mm, dd = int(yymmdd[0:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
-    if not (1 <= mm <= 12 and 1 <= dd <= 31):
-        return None
-
-    current_year = datetime.date.today().year
-    current_yy = current_year % 100
-
-    if is_dob:
-        # DOB cutoff: if YY is greater than current year YY, person was born in 1900s
-        century = 1900 if yy > current_yy else 2000
-    else:
-        # Expiry cutoff: travel docs are typically valid up to 10-20 years into the future
-        century = 2000 if yy <= current_yy + 25 else 1900
-
-    full_year = century + yy
-    try:
-        dt = datetime.date(full_year, mm, dd)
-        return dt.isoformat()
-    except ValueError:
-        return None
-
-
-def clean_mrz_line(line: str) -> str:
-    """Clean and normalize a detected MRZ line string."""
-    line = line.strip().upper()
-    line = re.sub(r"[^A-Z0-9<]", "", line)
-    return line
-
-
-@dataclass
-class MRZCheckResult:
-    """Detailed verification outcome of an MRZ block."""
-    valid_format: bool
-    format_type: Optional[str] = None  # TD1 or TD3
-    doc_type: Optional[str] = None     # PASSPORT or NATIONAL_ID
-    document_number: Optional[str] = None
-    dob: Optional[str] = None
-    expiry: Optional[str] = None
-    gender: Optional[str] = None
-    issuing_country: Optional[str] = None
-    nationality: Optional[str] = None
-    full_name: Optional[str] = None
-    raw_lines: List[str] = field(default_factory=list)
-    checksums: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    has_checksum_failure: bool = False
-    failure_details: List[str] = field(default_factory=list)
-
-
-def verify_check_digit(data: str, expected_char: str, label: str) -> Tuple[bool, Dict[str, Any]]:
-    """Verify a check digit against expected character and return status dict."""
-    calc = calculate_mrz_checksum(data)
-    observed = int(expected_char) if expected_char.isdigit() else -1
-    passed = (calc == observed)
-    return passed, {
-        "field": label,
-        "calculated": calc,
-        "observed": observed,
-        "passed": passed,
-    }
+from mrz_checksums import (
+    ICAO_WEIGHTS,
+    MRZCheckResult,
+    calculate_mrz_checksum,
+    clean_mrz_line,
+    icao_char_value,
+    parse_mrz_date,
+    verify_check_digit,
+)
 
 
 def parse_td3_mrz(lines: List[str]) -> MRZCheckResult:
     """Parse and verify a 2-line x 44-character TD3 Passport MRZ."""
     l1, l2 = lines[0], lines[1]
+    if l2.startswith(("P<", "P", "V<", "V")) and not l1.startswith(("P<", "P", "V<", "V")):
+        l1, l2 = l2, l1
+
     if len(l1) != 44 or len(l2) != 44:
         return MRZCheckResult(valid_format=False, failure_details=["TD3 line length must be 44 chars."])
 
+    is_visa = l1.startswith("V")
+    doc_type = "VISA" if is_visa else "PASSPORT"
+    format_type = "MRV-A" if is_visa else "TD3"
     issuing_country = l1[2:5].replace("<", "")
-    names_raw = l1[5:44]
-    name_parts = names_raw.split("<<")
+    name_field = l1[5:]
+    name_parts = name_field.split("<<")
     surname = name_parts[0].replace("<", " ").strip()
     given_names = name_parts[1].replace("<", " ").strip() if len(name_parts) > 1 else ""
-    full_name = f"{surname} {given_names}".strip()
+    full_name = f"{surname} {given_names}".strip() if surname and given_names else (surname or given_names)
 
     doc_num_raw = l2[0:9]
-    doc_num_clean = doc_num_raw.replace("<", "")
-    doc_num_cd = l2[9]
+    doc_num = doc_num_raw.replace("<", "")
+    doc_num_check = l2[9]
     nationality = l2[10:13].replace("<", "")
     dob_raw = l2[13:19]
-    dob_cd = l2[19]
-    sex = l2[20]
-    sex_clean = "M" if sex == "M" else ("F" if sex == "F" else "X")
-    exp_raw = l2[21:27]
-    exp_cd = l2[27]
-    opt_data = l2[28:42]
-    opt_cd = l2[42]
-    comp_cd = l2[43]
+    dob_check = l2[19]
+    gender = l2[20] if l2[20] in ("M", "F") else None
+    expiry_raw = l2[21:27]
+    expiry_check = l2[27]
+    composite_data = l2[0:10] + l2[13:20] + l2[21:43]
+    composite_check = l2[43]
 
-    checksums: Dict[str, Dict[str, Any]] = {}
-    failures: List[str] = []
+    checksums = {}
+    failures = []
 
-    p_doc, res_doc = verify_check_digit(doc_num_raw, doc_num_cd, "doc_number")
-    checksums["doc_number"] = res_doc
+    p_doc, c_doc = verify_check_digit(doc_num_raw, doc_num_check, "document_number")
+    checksums["document_number"] = c_doc
     if not p_doc:
-        failures.append(f"Document number checksum mismatch: calc {res_doc['calculated']} vs {doc_num_cd}")
+        failures.append("Document number checksum mismatch")
 
-    p_dob, res_dob = verify_check_digit(dob_raw, dob_cd, "dob")
-    checksums["dob"] = res_dob
+    p_dob, c_dob = verify_check_digit(dob_raw, dob_check, "dob")
+    checksums["dob"] = c_dob
     if not p_dob:
-        failures.append(f"DOB checksum mismatch: calc {res_dob['calculated']} vs {dob_cd}")
+        failures.append("DOB checksum mismatch")
 
-    p_exp, res_exp = verify_check_digit(exp_raw, exp_cd, "expiry")
-    checksums["expiry"] = res_exp
+    p_exp, c_exp = verify_check_digit(expiry_raw, expiry_check, "expiry")
+    checksums["expiry"] = c_exp
     if not p_exp:
-        failures.append(f"Expiry checksum mismatch: calc {res_exp['calculated']} vs {exp_cd}")
+        failures.append("Expiry checksum mismatch")
 
-    # Composite check digit covers: l2[0:10] + l2[13:20] + l2[21:43]
-    comp_data = l2[0:10] + l2[13:20] + l2[21:43]
-    p_comp, res_comp = verify_check_digit(comp_data, comp_cd, "composite")
-    checksums["composite"] = res_comp
-    if not p_comp:
-        failures.append(f"Composite MRZ checksum mismatch: calc {res_comp['calculated']} vs {comp_cd}")
+    if not is_visa:
+        p_comp, c_comp = verify_check_digit(composite_data, composite_check, "composite")
+        checksums["composite"] = c_comp
+        if not p_comp:
+            failures.append("Composite checksum mismatch")
 
     return MRZCheckResult(
-        valid_format=True,
-        format_type="TD3",
-        doc_type="PASSPORT",
-        document_number=doc_num_clean,
-        dob=parse_mrz_date(dob_raw, is_dob=True),
-        expiry=parse_mrz_date(exp_raw, is_dob=False),
-        gender=sex_clean,
-        issuing_country=issuing_country,
-        nationality=nationality,
-        full_name=full_name,
-        raw_lines=[l1, l2],
-        checksums=checksums,
-        has_checksum_failure=(len(failures) > 0),
-        failure_details=failures,
+        valid_format=True, format_type=format_type, doc_type=doc_type,
+        document_number=doc_num, dob=parse_mrz_date(dob_raw, is_dob=True),
+        expiry=parse_mrz_date(expiry_raw, is_dob=False), gender=gender,
+        issuing_country=issuing_country, nationality=nationality, full_name=full_name,
+        raw_lines=[l1, l2], checksums=checksums,
+        has_checksum_failure=(len(failures) > 0), failure_details=failures,
     )
 
 
 def parse_td1_mrz(lines: List[str]) -> MRZCheckResult:
     """Parse and verify a 3-line x 30-character TD1 ID Card MRZ."""
-    l1, l2, l3 = lines[0], lines[1], lines[2]
-    if len(l1) != 30 or len(l2) != 30 or len(l3) != 30:
-        return MRZCheckResult(valid_format=False, failure_details=["TD1 line length must be 30 chars."])
+    if len(lines) != 3 or any(len(l) != 30 for l in lines):
+        return MRZCheckResult(valid_format=False, failure_details=["TD1 requires exactly 3 lines of 30 characters."])
 
+    l1, l2, l3 = lines[0], lines[1], lines[2]
     issuing_country = l1[2:5].replace("<", "")
     doc_num_raw = l1[5:14]
-    doc_num_clean = doc_num_raw.replace("<", "")
-    doc_num_cd = l1[14]
+    doc_num = doc_num_raw.replace("<", "")
+    doc_num_check = l1[14]
 
-    dob_raw = l2[0:6]
-    dob_cd = l2[6]
-    sex = l2[7]
-    sex_clean = "M" if sex == "M" else ("F" if sex == "F" else "X")
-    exp_raw = l2[8:14]
-    exp_cd = l2[14]
+    dob_raw, dob_check = l2[0:6], l2[6]
+    gender = l2[7] if l2[7] in ("M", "F") else None
+    expiry_raw, expiry_check = l2[8:14], l2[14]
     nationality = l2[15:18].replace("<", "")
-    comp_cd = l2[29]
+    composite_data = l1[5:30] + l2[0:7] + l2[8:15] + l2[18:29]
+    composite_check = l2[29]
 
-    name_parts = l3.split("<<")
+    name_field = l3
+    name_parts = name_field.split("<<")
     surname = name_parts[0].replace("<", " ").strip()
     given_names = name_parts[1].replace("<", " ").strip() if len(name_parts) > 1 else ""
-    full_name = f"{surname} {given_names}".strip()
+    full_name = f"{surname} {given_names}".strip() if surname and given_names else (surname or given_names)
 
-    checksums: Dict[str, Dict[str, Any]] = {}
-    failures: List[str] = []
-
-    p_doc, res_doc = verify_check_digit(doc_num_raw, doc_num_cd, "doc_number")
-    checksums["doc_number"] = res_doc
-    if not p_doc:
-        failures.append(f"Document number checksum mismatch in TD1.")
-
-    p_dob, res_dob = verify_check_digit(dob_raw, dob_cd, "dob")
-    checksums["dob"] = res_dob
-    if not p_dob:
-        failures.append(f"DOB checksum mismatch in TD1.")
-
-    p_exp, res_exp = verify_check_digit(exp_raw, exp_cd, "expiry")
-    checksums["expiry"] = res_exp
-    if not p_exp:
-        failures.append(f"Expiry checksum mismatch in TD1.")
-
-    comp_data = l1[5:30] + l2[0:7] + l2[8:15] + l2[18:29]
-    p_comp, res_comp = verify_check_digit(comp_data, comp_cd, "composite")
-    checksums["composite"] = res_comp
-    if not p_comp:
-        failures.append(f"Composite MRZ checksum mismatch in TD1.")
+    checksums = {}
+    failures = []
+    for label, raw_val, chk in [("document_number", doc_num_raw, doc_num_check), ("dob", dob_raw, dob_check), ("expiry", expiry_raw, expiry_check), ("composite", composite_data, composite_check)]:
+        p, c = verify_check_digit(raw_val, chk, label)
+        checksums[label] = c
+        if not p:
+            failures.append(f"{label} checksum mismatch")
 
     return MRZCheckResult(
-        valid_format=True,
-        format_type="TD1",
-        doc_type="NATIONAL_ID",
-        document_number=doc_num_clean,
-        dob=parse_mrz_date(dob_raw, is_dob=True),
-        expiry=parse_mrz_date(exp_raw, is_dob=False),
-        gender=sex_clean,
-        issuing_country=issuing_country,
-        nationality=nationality,
-        full_name=full_name,
-        raw_lines=[l1, l2, l3],
-        checksums=checksums,
-        has_checksum_failure=(len(failures) > 0),
-        failure_details=failures,
+        valid_format=True, format_type="TD1", doc_type="NATIONAL_ID",
+        document_number=doc_num, dob=parse_mrz_date(dob_raw, is_dob=True),
+        expiry=parse_mrz_date(expiry_raw, is_dob=False), gender=gender,
+        issuing_country=issuing_country, nationality=nationality, full_name=full_name,
+        raw_lines=[l1, l2, l3], checksums=checksums,
+        has_checksum_failure=(len(failures) > 0), failure_details=failures,
     )
 
 
-def _normalize_td3_pair(l1_raw: str, l2_raw: str) -> Tuple[str, str]:
-    """Normalize OCR artifacts in candidate 2-line TD3 Passport MRZ."""
-    l1 = re.sub(r"[^A-Z0-9<]", "", l1_raw.upper().strip())
-    l2 = re.sub(r"[^A-Z0-9<]", "", l2_raw.upper().strip())
+def extract_and_verify_mrz(ocr_lines: List[str]) -> Optional[MRZCheckResult]:
+    """Find, clean, and verify MRZ blocks from raw OCR text lines."""
+    candidate_lines = []
+    for raw in ocr_lines:
+        cleaned = clean_mrz_line(raw)
+        if len(cleaned) >= 20 and ("<" in cleaned or cleaned.startswith(("P", "V", "I", "A"))):
+            candidate_lines.append(cleaned)
 
-    if len(l1) < 44:
-        l1 = l1 + "<" * (44 - len(l1))
-    elif len(l1) > 44:
-        l1 = l1[:44]
+    # Pass 1: TD3 44-character lines with candidate ranking
+    td3_candidates = [c for c in candidate_lines if len(c) == 44]
+    best_td3: Optional[MRZCheckResult] = None
+    min_failures = 999
 
-    if len(l2) < 44:
-        l2 = l2 + "<" * (44 - len(l2))
-    elif len(l2) > 44:
-        l2 = l2[:44]
+    for i in range(len(td3_candidates) - 1):
+        c1, c2 = td3_candidates[i], td3_candidates[i + 1]
+        for pair in [(c1, c2), (c2, c1)]:
+            top, bottom = pair
+            if not (top.startswith(("P<", "P", "V<", "V")) or "<" in top):
+                continue
+            res = parse_td3_mrz([top, bottom])
+            if res.valid_format:
+                num_fails = len(res.failure_details)
+                if num_fails < min_failures:
+                    min_failures = num_fails
+                    best_td3 = res
+                if num_fails == 0:
+                    return res
 
-    chars = list(l2)
-    digit_fix = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "T": "1", "Z": "2", "B": "8", "S": "5", "G": "6", "E": "6"}
-
-    # Fix check digit at index 9
-    if chars[9] in digit_fix:
-        chars[9] = digit_fix[chars[9]]
-
-    # Fix DOB at 13..19 and check digit at 19
-    for i in range(13, 20):
-        if chars[i] in digit_fix:
-            chars[i] = digit_fix[chars[i]]
-
-    # Fix Expiry at 21..27 and check digit at 27
-    for i in range(21, 28):
-        if chars[i] in digit_fix:
-            chars[i] = digit_fix[chars[i]]
-
-    # In filler zone (28..43), replace common misread filler chars with <
-    for i in range(28, 43):
-        if chars[i] in ("K", "X", "C", "E", "F"):
-            chars[i] = "<"
-
-    # Fix composite check digit at index 43
-    if chars[43] in digit_fix:
-        chars[43] = digit_fix[chars[43]]
-
-    return l1, "".join(chars)
-
-
-def extract_and_verify_mrz(text_lines: List[str]) -> Optional[MRZCheckResult]:
-    """Identify, clean, and verify MRZ lines from a list of OCR extracted text lines."""
-    cleaned = [clean_mrz_line(line) for line in text_lines]
-    candidate_lines = [l for l in cleaned if len(l) in (44, 30) or "<" in l]
-
-    # Pass 1: Look for exact 2 consecutive 44-char lines (TD3)
-    for i in range(len(candidate_lines) - 1):
-        l1, l2 = candidate_lines[i], candidate_lines[i + 1]
-        if len(l1) == 44 and len(l2) == 44 and (l1.startswith("P") or l1.startswith("V")):
-            return parse_td3_mrz([l1, l2])
-
-    # Pass 2: Look for candidate TD3 lines that require length/OCR normalization
-    for i in range(len(candidate_lines) - 1):
-        l1, l2 = candidate_lines[i], candidate_lines[i + 1]
-        if (l1.startswith("P<") or l1.startswith("V<")) and 35 <= len(l1) <= 50 and 35 <= len(l2) <= 50:
-            norm_l1, norm_l2 = _normalize_td3_pair(l1, l2)
-            res = parse_td3_mrz([norm_l1, norm_l2])
-            if res.valid_format and (not res.has_checksum_failure or len(res.failure_details) <= 1):
+    # Pass 2: Fuzzy reconstruction of 44-character lines
+    if not best_td3:
+        fuzzy_44 = []
+        for c in candidate_lines:
+            if 40 <= len(c) < 44:
+                fuzzy_44.append(c + "<" * (44 - len(c)))
+            elif len(c) == 44:
+                fuzzy_44.append(c)
+        for i in range(len(fuzzy_44) - 1):
+            res = parse_td3_mrz([fuzzy_44[i], fuzzy_44[i + 1]])
+            if res.valid_format and not res.has_checksum_failure:
                 return res
 
-    # Pass 3: Look for 3 consecutive 30-char lines (TD1)
+    # Pass 3: TD1 30-character lines (3 lines)
     for i in range(len(candidate_lines) - 2):
         l1, l2, l3 = candidate_lines[i], candidate_lines[i + 1], candidate_lines[i + 2]
-        if len(l1) == 30 and len(l2) == 30 and len(l3) == 30 and (l1.startswith("I") or l1.startswith("A")):
+        if len(l1) == 30 and len(l2) == 30 and len(l3) == 30 and l1.startswith(("I", "A")):
             return parse_td1_mrz([l1, l2, l3])
 
-    return None
-
+    return best_td3
