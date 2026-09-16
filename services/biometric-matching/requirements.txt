@@ -1,0 +1,36 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+httpx>=0.27.0
+psycopg2-binary>=2.9.9
+
+# liveness + face embedding / matching
+opencv-python-headless
+numpy
+pillow
+torch
+torchvision
+deepface
+tf-keras
+
+# configuration
+pyyaml
+
+# result cache
+redis>=5.0.0
+
+# Process-pool isolation for native-library inference calls (see inference_pool.py)
+loky>=3.4.0
+
+# Circuit breaker for the risk-scoring-engine push (see risk_engine_breaker.py)
+aiobreaker>=1.2.0
+
+# Rate limiting for the public /screen endpoint (see rate_limit.py)
+slowapi>=0.1.9
+
+# testing
+pytest>=8.0.0
+
+# Prometheus metrics (/metrics endpoint)
+prometheus-fastapi-instrumentator>=7.0.0
