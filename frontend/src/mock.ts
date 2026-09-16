@@ -56,12 +56,27 @@ function buildModule(id: ModuleResult['id'], label: string, checks: CheckSpec[])
   return { id, label, score, hardFail, subChecks }
 }
 
-function decide(modules: ModuleResult[]): { decision: Decision; riskScore: number } {
+/** Exposed so screening.ts can mock only the modules that were actually unreachable,
+ * instead of discarding a real module response when one comes back. */
+export function mockModule(id: ModuleResult['id']): ModuleResult {
+  if (id === 'ocr') return buildModule('ocr', 'OCR, Extraction & Watchlist', OCR_CHECKS)
+  if (id === 'forensics') return buildModule('forensics', 'Visual / Image Forensics', FORENSICS_CHECKS)
+  return buildModule('biometric', 'Biometric Matching', BIOMETRIC_CHECKS)
+}
+
+export function decide(modules: ModuleResult[]): { decision: Decision; riskScore: number } {
   const anyHardFail = modules.some((m) => m.hardFail)
   const riskScore = Math.round(modules.reduce((s, m) => s + m.score, 0) / modules.length)
   if (anyHardFail) return { decision: 'REJECT', riskScore }
   if (riskScore < 60) return { decision: 'MANUAL_REVIEW', riskScore }
   return { decision: 'ACCEPT', riskScore }
+}
+
+/** Cosmetic case metadata (subject/doc-type/checkpoint) that no real service supplies yet
+ * (see API_CONTRACT.md — a module only returns score/hard_fail/reason_codes, and
+ * risk-scoring-engine, the thing that would know a subject's name, doesn't exist yet). */
+export function randomCaseMeta() {
+  return { subjectName: pick(NAMES), documentType: pick(DOC_TYPES), checkpoint: pick(CHECKPOINTS) }
 }
 
 export function generateCase(id?: string): ScreeningCase {

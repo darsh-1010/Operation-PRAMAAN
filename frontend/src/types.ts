@@ -26,4 +26,9 @@ export interface ScreeningCase {
   riskScore: number
   decision: Decision
   modules: ModuleResult[]
+  latencyMs?: number
+  reasonCodes?: string[]
+  mrzValid?: boolean
+  extractedFields?: Array<{ field_key: string; field_value: string; source: string; confidence: number }>
 }
+

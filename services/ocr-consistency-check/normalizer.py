@@ -19,7 +19,7 @@ MONTH_MAP = {
     "NOV": 11, "NOVEMBER": 11, "DEC": 12, "DECEMBER": 12,
 }
 
-HONORIFICS = {"MR", "MRS", "MS", "DR", "PROF", "SHRI", "SMT", "KUMAR", "MISS"}
+HONORIFICS = {"MR", "MRS", "MS", "DR", "PROF", "SHRI", "SMT", "MISS"}
 
 
 def normalize_date(date_str: Optional[str]) -> Optional[str]:
@@ -104,38 +104,6 @@ def normalize_id_number(id_str: Optional[str]) -> Optional[str]:
     return cleaned if cleaned else None
 
 
-def normalize_bikram_sambat_date(bs_date_str: Optional[str]) -> Optional[str]:
-    """Convert a Nepali Bikram Sambat (B.S.) date string to ISO-8601 Gregorian.
-
-    Supports:
-    - Numeric dates: '2082-04-25', '25/04/2082', '2082/04/25'
-    - Devanagari numerals: '२०८२/०४/२५', '२५/०४/२०८२'
-    - Textual Nepali months: '15 Baishakh 2080', '१५ बैशाख २०८०'
-    """
-    if not bs_date_str:
-        return None
-
-    try:
-        from nepali_calendar import convert_bikram_sambat
-        res = convert_bikram_sambat(bs_date_str)
-        if res.is_valid and res.gregorian_date:
-            return res.gregorian_date
-    except Exception:
-        pass
-
-    iso = normalize_date(bs_date_str)
-    if not iso:
-        return None
-
-    try:
-        import nepali_datetime
-        y, m, d = (int(x) for x in iso.split("-"))
-        bs_date = nepali_datetime.date(y, m, d)
-        return bs_date.to_datetime_date().isoformat()
-    except (ImportError, ValueError):
-        return None
-
-
 def normalize_gender(gender_str: Optional[str]) -> Optional[str]:
     """Normalize gender code to 'M', 'F', or 'X'."""
     if not gender_str:
@@ -147,4 +115,23 @@ def normalize_gender(gender_str: Optional[str]) -> Optional[str]:
     if g in ("F", "FEMALE", "WOMAN"):
         return "F"
     return "X"
+
+
+def normalize_bikram_sambat_date(bs_str: Optional[str]) -> Optional[str]:
+    """Convert a Bikram Sambat date string to Gregorian ISO YYYY-MM-DD date."""
+    if not bs_str:
+        return None
+    try:
+        from nepali_calendar import convert_bikram_sambat
+        res = convert_bikram_sambat(bs_str)
+        return res.gregorian_date if res.is_valid else None
+    except Exception:
+        return None
+
+
+def compute_name_similarity(name1: Optional[str], name2: Optional[str]) -> float:
+    """Compute fuzzy similarity ratio between two names."""
+    from matcher import compute_fuzzy_name_score
+    return compute_fuzzy_name_score(name1, name2)
+
 
