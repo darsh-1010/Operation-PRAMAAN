@@ -9,4 +9,6 @@ COPY . .
 
 EXPOSE 3000
 
-CMD ["npm", "run", "dev"]
+# --host: vite's dev server binds to localhost only by default, which is unreachable from
+# outside the container even with the port published.
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

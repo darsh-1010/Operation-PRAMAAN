@@ -25,6 +25,41 @@ _run_screening_pipeline = run_screening_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ocr_service")
 
+RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
+_cache = ResultCache(namespace="ocr")
+
+
+@RISK_ENGINE_BREAKER
+async def _push_to_risk_engine(session_id: str, hard_fail: bool, score: float, reasons: List[str]) -> None:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        await client.post(
+            f"{RISK_ENGINE_URL}/flag-check",
+            json={"uuid": session_id, "module": "ocr", "flag": hard_fail, "reasons": reasons},
+        )
+        # If that flag was true, the risk engine already rejected and cleared this uuid —
+        # this second call still fires (simpler than branching), but lands on the
+        # already-finalized guard on the other end rather than a live wait.
+        await client.post(
+            f"{RISK_ENGINE_URL}/submit-score",
+            json={"uuid": session_id, "module": "ocr", "ocr": {"score": score, "reasons": reasons}},
+        )
+    logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, score=%s)", session_id, hard_fail, score)
+
+
+async def _notify_risk_engine(session_id: str, hard_fail: bool, score: float, reasons: List[str]) -> None:
+    """Push this module's flag + score to risk-scoring-engine (see
+    ../../services/risk-scoring-engine/README.md for the two-stage contract). Best-effort:
+    the risk engine being down must never break this service's own /screen response to the
+    frontend, so failures are logged and swallowed rather than raised. Circuit-breaker-backed
+    (see risk_engine_breaker.py) so a down risk-scoring-engine fails fast instead of costing
+    a full httpx timeout on every single request."""
+    try:
+        await _push_to_risk_engine(session_id, hard_fail, score, reasons)
+    except CircuitBreakerError:
+        logger.warning("uuid=%s risk-scoring-engine circuit open, skipping push", session_id)
+    except httpx.HTTPError as exc:
+        logger.warning("uuid=%s risk-scoring-engine unreachable, skipping push: %s", session_id, exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:

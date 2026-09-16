@@ -1,0 +1,22 @@
+# Scrape config for the observability stack (see docker-compose.yml's prometheus service).
+# Each of the 4 backend services exposes /metrics via prometheus-fastapi-instrumentator
+# (see each service's main.py) — nothing to install or configure on their side beyond that.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: ocr-consistency-check
+    static_configs:
+      - targets: ["ocr-consistency-check:8001"]
+
+  - job_name: visual-image-forensics
+    static_configs:
+      - targets: ["visual-image-forensics:8002"]
+
+  - job_name: biometric-matching
+    static_configs:
+      - targets: ["biometric-matching:8003"]
+
+  - job_name: risk-scoring-engine
+    static_configs:
+      - targets: ["risk-scoring-engine:8004"]

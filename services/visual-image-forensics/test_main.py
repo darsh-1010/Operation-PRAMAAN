@@ -1,6 +1,6 @@
 """Runnable self-check for POST /screen — start the real server and hit it over HTTP,
 using only the stdlib (no test-framework dependency for a single endpoint check).
-Run: python test_main.py
+Run: python test_main.py, or via pytest as test_screen_endpoint.
 """
 import io
 import json
@@ -78,6 +78,9 @@ def main() -> None:
 
     server.should_exit = True
     print("OK:", result)
+
+
+test_screen_endpoint = main  # pytest collects this as a test; `python test_main.py` still works below.
 
 
 if __name__ == "__main__":

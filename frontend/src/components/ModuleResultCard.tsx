@@ -13,8 +13,8 @@ export default function ModuleResultCard({ module }: { module: ModuleResult }) {
       <ScoreBar score={module.score} />
 
       <ul className="mt-3 space-y-2">
-        {module.subChecks.map((check) => (
-          <li key={check.label} className="flex items-start gap-2">
+        {module.subChecks.map((check, i) => (
+          <li key={`${check.label}-${i}`} className="flex items-start gap-2">
             {check.passed ? (
               <svg viewBox="0 0 24 24" className="mt-0.5 h-3.5 w-3.5 shrink-0 stroke-success fill-none" strokeWidth={2.5}>
                 <path d="m5 13 4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
