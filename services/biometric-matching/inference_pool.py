@@ -33,7 +33,7 @@ T = TypeVar("T")
 # Worker processes each hold their own copy of the OCR model once warmed (first call pays
 # the load cost) — keep this small by default; raise it only if you have the RAM to spare.
 _WORKERS = int(os.environ.get("INFERENCE_WORKERS", "1"))
-_TASK_TIMEOUT_SECONDS = int(os.environ.get("INFERENCE_TIMEOUT_SECONDS", "120"))
+_TASK_TIMEOUT_SECONDS = int(os.environ.get("INFERENCE_TIMEOUT_SECONDS", "600"))
 
 
 class InferenceCrashed(Exception):

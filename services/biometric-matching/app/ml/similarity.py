@@ -4,7 +4,7 @@ Provides the ``compare(embedding_a, embedding_b) → similarity`` abstraction sp
 in the biometric module proposal.  The metric must match what the selected face model
 was trained/validated with.
 
-Current default: cosine similarity (appropriate for dlib's L2-normalized 128-D vectors).
+Current default: cosine similarity (appropriate for ArcFace 512-D vectors via DeepFace).
 """
 from __future__ import annotations
 
@@ -36,8 +36,7 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 def euclidean_distance(a: list[float], b: list[float]) -> float:
     """Compute Euclidean distance between two vectors.
 
-    Lower = more similar.  For dlib 128-D embeddings, typical thresholds are around 0.6
-    (same person) vs >0.6 (different person), but this must be validated per model.
+    Lower = more similar. Typical thresholds must be validated per model.
     """
     if len(a) != len(b):
         raise ValueError(f"Vector dimension mismatch: {len(a)} vs {len(b)}")

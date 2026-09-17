@@ -4,14 +4,14 @@ Implements POST /screen per ../../API_CONTRACT.md. Validates input per SECURITY.
 runs face detection/alignment/quality on uploaded images, and generates face embeddings
 for matching.
 
-Pipeline status (2026-09-09):
+Pipeline status:
   [x] Input validation (preserved from original stub)
   [x] Face detection, alignment, quality assessment
-  [x] Face embedding generation (dlib 128-D, placeholder model)
+  [x] Face embedding generation (ArcFace 512-D, via DeepFace)
   [x] Doc-to-selfie similarity computation
-  [ ] Cross-document consistency — not yet wired
-  [ ] Liveness detection — not yet implemented
-  [ ] Database persistence — no database in stack yet
+  [x] Cross-document consistency
+  [x] Liveness detection (FASNet via DeepFace)
+  [x] Database persistence (Postgres via db.py)
   [ ] Milvus integration — not yet needed
 """
 import asyncio
@@ -355,10 +355,29 @@ async def screen(
             reason_codes.append(f"{doc1}_vs_{doc2}: similarity_computation_error")
 
     # --- Scoring ---
-    # Combine doc-to-selfie and cross-document scores.
-    all_scores = match_scores + cross_doc_scores
-    if all_scores:
-        overall_score = sum(all_scores) / len(all_scores)
+    # Combine signals using configured fusion weights
+    liveness_score_val = selfie_result.get("liveness_score", 0.5) if selfie_result else 0.5
+    avg_doc_score = sum(match_scores) / len(match_scores) if match_scores else 0.5
+    avg_cross_doc = sum(cross_doc_scores) / len(cross_doc_scores) if cross_doc_scores else 0.5
+
+    active_weights = {}
+    if selfie_result and selfie_result.get("liveness_score") is not None:
+        active_weights["liveness"] = _config.fusion.liveness_weight
+    if match_scores:
+        active_weights["doc_match"] = _config.fusion.doc_match_weight
+    if cross_doc_scores:
+        active_weights["cross_doc"] = _config.fusion.cross_document_weight
+
+    total_weight = sum(active_weights.values())
+    
+    if total_weight > 0:
+        overall_score = 0.0
+        if "liveness" in active_weights:
+            overall_score += liveness_score_val * (active_weights["liveness"] / total_weight)
+        if "doc_match" in active_weights:
+            overall_score += avg_doc_score * (active_weights["doc_match"] / total_weight)
+        if "cross_doc" in active_weights:
+            overall_score += avg_cross_doc * (active_weights["cross_doc"] / total_weight)
     else:
         # No matching was possible
         overall_score = 0.5  # neutral — cannot assess
@@ -370,7 +389,7 @@ async def screen(
     api_score = int(round(internal_score * 100))
 
     if not reason_codes:
-        if all_scores:
+        if active_weights:
             reason_codes.append("face_matching_completed")
         else:
             reason_codes.append("no_face_matching_performed")

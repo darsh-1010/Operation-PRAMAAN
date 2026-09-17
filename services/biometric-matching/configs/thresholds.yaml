@@ -25,14 +25,14 @@ liveness:
   hard_fail_threshold: 0.20    # below this → HARD FAIL
 
 doc_to_selfie:
-  accept_threshold: 0.60       # above this → PASS
-  review_threshold: 0.45       # above this → REVIEW, below → FAIL
-  hard_fail_threshold: 0.30    # below this → HARD FAIL (high quality only)
+  accept_threshold: 0.55       # above this -> PASS
+  review_threshold: 0.40       # above this -> REVIEW, below -> FAIL
+  hard_fail_threshold: 0.25    # below this -> HARD FAIL (high quality only)
 
 cross_document:
-  accept_threshold: 0.60
-  review_threshold: 0.45
-  hard_fail_threshold: 0.30
+  accept_threshold: 0.55
+  review_threshold: 0.40
+  hard_fail_threshold: 0.25
 
 fusion:
   liveness_weight: 0.35

@@ -37,9 +37,9 @@ class LivenessThresholds:
 
 @dataclass
 class DocToSelfieThresholds:
-    accept_threshold: float = 0.60
-    review_threshold: float = 0.45
-    hard_fail_threshold: float = 0.30
+    accept_threshold: float = 0.55
+    review_threshold: float = 0.40
+    hard_fail_threshold: float = 0.25
 
 
 @dataclass
