@@ -1,7 +1,6 @@
-import { decide, mockModule, randomCaseMeta } from './mock'
-import { buildScreeningPayload, dispatchToModules, type ModuleDispatchResult, type ModuleResponse } from './lib/submitScreening'
+import { generateCase } from './mock'
+import { buildScreeningPayload, dispatchToModules, type ModuleDispatchResult } from './lib/submitScreening'
 import type { DocKey } from './lib/documents'
-import type { ModuleResult, ScreeningCase, SubCheck } from './types'
 import type { Decision, ScreeningCase } from './types'
 
 function isUnreachable(d: ModuleDispatchResult): d is ModuleDispatchResult & { reachable: false } {
@@ -25,44 +24,12 @@ function formatCheckLabel(checkType: string): string {
     default:
       return checkType.replace(/_/g, ' ')
   }
-const MODULE_ID_BY_SERVICE_NAME: Record<string, ModuleResult['id']> = {
-  'ocr-consistency-check': 'ocr',
-  'visual-image-forensics': 'forensics',
-  'biometric-matching': 'biometric',
-}
-
-const MODULE_LABELS: Record<ModuleResult['id'], string> = {
-  ocr: 'OCR, Extraction & Watchlist',
-  forensics: 'Visual / Image Forensics',
-  biometric: 'Biometric Matching',
-}
-
-/** Turns a module's real API_CONTRACT.md response into the dashboard's per-check shape.
- * The contract only carries score/hard_fail/reason_codes — no sub-check breakdown — so each
- * reason code becomes one failed row, or a single passed row when there are none. */
-function moduleFromResponse(id: ModuleResult['id'], response: ModuleResponse): ModuleResult {
-  const subChecks: SubCheck[] = response.reason_codes.length
-    ? response.reason_codes.map((code) => ({ label: code, score: response.score, passed: false, reason: code }))
-    : [{ label: 'All checks passed', score: response.score, passed: true }]
-  return { id, label: MODULE_LABELS[id], score: response.score, hardFail: response.hard_fail, subChecks }
 }
 
 /**
  * Runs a screening: builds the uuid + documents_present + files payload and dispatches it
  * to all 3 module services in parallel. When ocr-consistency-check responds, the real
  * score, check statuses, latency, and extracted fields are displayed live.
- * to all 3 module services in parallel (see submitScreening.ts). A module that responds
- * (matching API_CONTRACT.md's shape) contributes its real score/hard_fail/reason_codes to
- * the result; a module that's unreachable or not yet implemented falls back to a mocked
- * result for that module only, so the dashboard stays usable during rollout.
-
- * Runs a screening: builds the uuid + documents_present + files payload, dispatches it to
- * all 3 module services in parallel, and turns their real responses into a ScreeningCase —
- * see lib/buildLiveCase.ts for how the modules' scores are fused into one decision.
- *
- * Only falls back to a fabricated demo case when no module URLs are configured at all (a
- * fresh checkout with no .env yet) — a real submission that reaches at least one module
- * always renders that module's real result rather than a mock.
  */
 export async function runScreening(files: Partial<Record<DocKey, File>>): Promise<ScreeningCase> {
   const payload = buildScreeningPayload(files)
@@ -75,9 +42,6 @@ export async function runScreening(files: Partial<Record<DocKey, File>>): Promis
     console.warn('No module service URLs configured (see .env.example) — using mock result.')
   } else if (unreachable.length) {
     console.warn(`Module services unreachable, mocking their result: ${unreachable.map((d) => `${d.name} (${d.error})`).join(', ')}`)
-  }
-
-    console.warn(`Module services unreachable: ${unreachable.map((d) => `${d.name} (${d.error})`).join(', ')}`)
   }
 
   const ocrResult = dispatch.find((d) => d.name === 'ocr-consistency-check' && d.reachable)
@@ -180,28 +144,4 @@ export async function runScreening(files: Partial<Record<DocKey, File>>): Promis
   // Fallback to mock case if OCR service is offline
   await new Promise((resolve) => setTimeout(resolve, 500))
   return generateCase(payload.uuid)
-  const modules = (Object.keys(MODULE_LABELS) as ModuleResult['id'][]).map((id) => {
-    const found = dispatch.find((d) => MODULE_ID_BY_SERVICE_NAME[d.name] === id)
-    return found && found.reachable ? moduleFromResponse(id, found.response) : mockModule(id)
-  })
-
-  const { decision, riskScore } = decide(modules)
-  return { id: payload.uuid, ...randomCaseMeta(), timestamp: new Date().toISOString(), riskScore, decision, modules }
-
-
-  if (dispatch.length === 0) {
-    console.warn('No module service URLs configured (see .env.example) — using mock result.')
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-    return generateCase(payload.uuid)
-  }
-
-  const unreachable = dispatch.filter(isUnreachable)
-  if (unreachable.length) {
-    console.warn(`Module services unreachable: ${unreachable.map((d) => `${d.name} (${d.error})`).join(', ')}`)
-  }
-
-  const riskResult = await pollRiskResult(payload.uuid)
-  return buildLiveCase(payload, dispatch, riskResult)
-
 }
-
