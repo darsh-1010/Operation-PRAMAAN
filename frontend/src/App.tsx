@@ -41,7 +41,7 @@ export default function App() {
           {tab === 'stats' ? (
             <StatisticsTab cases={cases} />
           ) : (
-            <NewScreeningTab onRun={handleRun} loading={loading} result={active} />
+            <NewScreeningTab onRun={handleRun} loading={loading} result={active} onBack={() => setTab('stats')} />
           )}
         </main>
       </div>

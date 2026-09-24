@@ -9,14 +9,19 @@ and weighted Score A calculation.
 from __future__ import annotations
 from contextlib import asynccontextmanager
 import logging
-from typing import AsyncGenerator
+import os
+from typing import AsyncGenerator, List
 
+import httpx
+from aiobreaker import CircuitBreakerError
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import DatabaseManager
 from multilingual_service import router as multilingual_router
 from ocr_engine import OCREngine
+from result_cache import ResultCache
+from risk_engine_breaker import RISK_ENGINE_BREAKER
 from routes import router as api_router, run_screening_pipeline
 
 # Re-export for any external or test references
