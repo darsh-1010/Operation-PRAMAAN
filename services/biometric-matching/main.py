@@ -32,6 +32,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+import evidence
 from app.config import BiometricConfig, load_config
 from app.db import BiometricDB
 from app.domain.enums import ReasonCode
@@ -45,27 +46,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger(__name__)
 
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
+# Must equal risk-scoring-engine's RISK_TOKEN_BIOMETRIC.
+RISK_ENGINE_TOKEN = os.environ.get("RISK_ENGINE_TOKEN", "").strip()
 
 
 @RISK_ENGINE_BREAKER
-async def _push_to_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str]) -> None:
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(
+async def _push_to_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str], evidence_refs: list[str]) -> None:
+    async with httpx.AsyncClient(timeout=5.0, headers={"Authorization": f"Bearer {RISK_ENGINE_TOKEN}"}) as client:
+        resp = await client.post(
             f"{RISK_ENGINE_URL}/submit-score",
-            json={"uuid": uuid, "module": "photo", "photo": {"score": score, "hard_fail": hard_fail, "reasons": reasons}},
+            json={"uuid": uuid, "module": "photo", "photo": {"score": score, "hard_fail": hard_fail, "reasons": reasons},
+                  "evidence": evidence_refs},
         )
+    # Only 5xx counts towards the breaker; a 4xx (e.g. unknown screening id) is that request's
+    # problem, and letting those trip it would let fake ids block every real screening.
+    if resp.status_code >= 500:
+        resp.raise_for_status()
+    if resp.status_code >= 400:
+        logger.error("uuid=%s risk-scoring-engine refused biometric result: %s %s", uuid, resp.status_code, resp.text[:200])
+        return
     logger.info("uuid=%s pushed to risk-scoring-engine (score=%s, hard_fail=%s)", uuid, score, hard_fail)
 
 
-async def _notify_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str]) -> None:
+async def _notify_risk_engine(uuid: str, score: int, hard_fail: bool, reasons: list[str], evidence_refs: list[str]) -> None:
     """Push this module's score to risk-scoring-engine as the "photo" module (see
     ../../services/risk-scoring-engine/README.md) — photo-match only ever calls /submit-score,
     never /flag-check; its hard_fail travels inside the score payload instead. Best-effort:
     the risk engine being down must never break this service's own /screen response.
     Circuit-breaker-backed (see risk_engine_breaker.py) so a down risk-scoring-engine fails
     fast instead of costing a full httpx timeout on every single request."""
+    if not RISK_ENGINE_TOKEN:
+        logger.error("uuid=%s RISK_ENGINE_TOKEN not set — result NOT sent to risk-scoring-engine", uuid)
+        return
     try:
-        await _push_to_risk_engine(uuid, score, hard_fail, reasons)
+        await _push_to_risk_engine(uuid, score, hard_fail, reasons, evidence_refs)
     except CircuitBreakerError:
         logger.warning("uuid=%s risk-scoring-engine circuit open, skipping push", uuid)
     except httpx.HTTPError as exc:
@@ -106,18 +120,22 @@ def validate_image(data: bytes, field: str) -> None:
 
 
 def validate_selfie(data: bytes) -> None:
-    """The selfie may be an image or a short video. Pillow can only decode the image case,
-    so a video is accepted on size alone here — real video validation (a decodable container,
-    duration/frame checks) belongs to the eventual liveness-detection implementation, not this
-    stub's job of proving the pipeline is wired."""
-    if not data:
-        raise HTTPException(400, "selfie: empty file")
-    if len(data) > MAX_VIDEO_BYTES:
-        raise HTTPException(400, f"selfie: exceeds {MAX_VIDEO_BYTES // (1024 * 1024)}MB limit")
+    """A still image only. Video liveness isn't implemented, so a video "selfie" used to be
+    accepted on size alone and then never actually checked by anything — accepting one would
+    mean accepting a selfie nobody looked at. The frontend only captures stills from the camera."""
+    validate_image(data, "selfie")
+
+
+def _keep_selfie(uuid: str, selfie_data: Optional[bytes]) -> tuple[list[str], list[str]]:
+    """(evidence refs, problems). Documents are retained by ocr-consistency-check; this module
+    keeps the selfie. The ref is sent even if storage fails, but the failure is surfaced."""
+    if selfie_data is None:
+        return [], []
     try:
-        Image.open(io.BytesIO(data)).verify()
-    except Exception:
-        pass  # not a still image — assume video, real check comes with real liveness detection
+        return [evidence.store(uuid, "selfie", selfie_data)], []
+    except evidence.EvidenceError as err:
+        logger.error("uuid=%s selfie evidence not retained: %s", uuid, err)
+        return [evidence.evidence_ref("selfie", selfie_data)], ["EVIDENCE_NOT_RETAINED"]
 
 
 def _run_face_pipeline(
@@ -183,6 +201,8 @@ async def screen(
     nationalId: Optional[UploadFile] = File(None),
     drivingLicence: Optional[UploadFile] = File(None),
     permit: Optional[UploadFile] = File(None),
+    voterId: Optional[UploadFile] = File(None),
+    citizenship: Optional[UploadFile] = File(None),
     selfie: Optional[UploadFile] = File(None),
 ) -> dict:
     try:
@@ -191,7 +211,7 @@ async def screen(
         raise HTTPException(400, "documents_present must be valid JSON")
 
     documents = {"passport": passport, "visa": visa, "nationalId": nationalId,
-                 "drivingLicence": drivingLicence, "permit": permit}
+                 "drivingLicence": drivingLicence, "permit": permit, "voterId": voterId, "citizenship": citizenship}
 
     # --- Validation (preserved from original stub) ---
     doc_data: dict[str, bytes] = {}
@@ -211,6 +231,7 @@ async def screen(
         validate_selfie(selfie_data)
 
     logger.info("uuid=%s /screen received: docs=%s selfie=%s", uuid, list(doc_data.keys()), selfie_data is not None)
+    evidence_refs, evidence_problem = _keep_selfie(uuid, selfie_data)
 
     # Same exact set of files re-submitted (retry, refresh, duplicate kiosk scan)? The face
     # pipeline is deterministic for identical input, so skip re-running detection/embedding/
@@ -222,7 +243,7 @@ async def screen(
     cached = _cache.get(fingerprint)
     if cached is not None:
         logger.info("uuid=%s /screen cache hit (fingerprint=%s)", uuid, fingerprint[:12])
-        await _notify_risk_engine(uuid, cached["score"], cached["hard_fail"], cached["reason_codes"])
+        await _notify_risk_engine(uuid, cached["score"], cached["hard_fail"], cached["reason_codes"] + evidence_problem, evidence_refs)
         return cached
 
     # --- Face pipeline ---
@@ -379,20 +400,23 @@ async def screen(
         if "cross_doc" in active_weights:
             overall_score += avg_cross_doc * (active_weights["cross_doc"] / total_weight)
     else:
-        # No matching was possible
-        overall_score = 0.5  # neutral — cannot assess
+        overall_score = 0.0  # nothing could be assessed — never a "neutral" pass-through score
 
     # Clamp to [0, 1]
     internal_score = max(0.0, min(1.0, overall_score))
 
-    # API contract: score is 0-100 integer
-    api_score = int(round(internal_score * 100))
+    if selfie_data is None:
+        reason_codes.append("SELFIE_MISSING: a live selfie is required to verify the holder")
+    if not match_scores:
+        # The core job is binding the person to the document. Without a doc-to-selfie match that
+        # never happened, so the face score is 0 — not the old "neutral" 0.5, which let a genuine
+        # passport presented by anyone reach PASS with no face check at all.
+        internal_score = 0.0
+        reason_codes.append("FACE_MATCH_NOT_PERFORMED: holder not verified against the document photo")
+    api_score = int(round(internal_score * 100))  # API contract: score is 0-100 integer
 
     if not reason_codes:
-        if active_weights:
-            reason_codes.append("face_matching_completed")
-        else:
-            reason_codes.append("no_face_matching_performed")
+        reason_codes.append("face_matching_completed")
 
     logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, api_score, hard_fail, reason_codes)
 
@@ -403,5 +427,5 @@ async def screen(
 
     result = {"score": api_score, "hard_fail": hard_fail, "reason_codes": reason_codes}
     _cache.set(fingerprint, result)
-    await _notify_risk_engine(uuid, api_score, hard_fail, reason_codes)
+    await _notify_risk_engine(uuid, api_score, hard_fail, reason_codes + evidence_problem, evidence_refs)
     return result

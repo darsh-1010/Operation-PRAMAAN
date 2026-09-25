@@ -2,7 +2,9 @@
 
 Implements POST /screen per ../../API_CONTRACT.md. Real AI-image detection, splice
 forensics, and guilloché checking aren't built yet (see TODO below) — this validates
-input per SECURITY.md and returns a stub result so the pipeline is wired end to end.
+input per SECURITY.md and reports honestly that it assessed nothing: score null, which the
+risk engine turns into "decision capped at MANUAL_REVIEW". (It used to report a perfect 100,
+handing every forged document 40% of the final score for free.)
 """
 import io
 import json
@@ -38,6 +40,9 @@ Instrumentator().instrument(app).expose(app)
 
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 RISK_ENGINE_URL = os.environ.get("RISK_ENGINE_URL", "http://localhost:8004").rstrip("/")
+# Must equal risk-scoring-engine's RISK_TOKEN_FORENSICS.
+RISK_ENGINE_TOKEN = os.environ.get("RISK_ENGINE_TOKEN", "").strip()
+NOT_ASSESSED = "FORENSICS_NOT_IMPLEMENTED: tamper/AI-image/guilloche checks not built — no assessment made"
 
 
 def validate_image(data: bytes, field: str) -> None:
@@ -55,28 +60,36 @@ def validate_image(data: bytes, field: str) -> None:
 
 
 @RISK_ENGINE_BREAKER
-async def _push_to_risk_engine(uuid: str, hard_fail: bool, tamper_score: float, reasons: list[str]) -> None:
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        await client.post(
-            f"{RISK_ENGINE_URL}/flag-check",
-            json={"uuid": uuid, "module": "forensics", "flag": hard_fail, "reasons": reasons},
-        )
-        await client.post(
-            f"{RISK_ENGINE_URL}/submit-score",
-            json={"uuid": uuid, "module": "tamper", "tamper": {"score": tamper_score}},
-        )
-    logger.info("uuid=%s pushed to risk-scoring-engine (flag=%s, tamper_score=%s)", uuid, hard_fail, tamper_score)
+async def _push_to_risk_engine(uuid: str, hard_fail: bool, tamper_score: Optional[float], reasons: list[str]) -> list[str]:
+    """Returns the requests the risk engine refused (4xx). Only 5xx/network errors raise, so
+    only they count towards the breaker — a flood of bad ids must not block real screenings."""
+    calls = [("/flag-check", {"uuid": uuid, "module": "forensics", "flag": hard_fail, "reasons": reasons}),
+             ("/submit-score", {"uuid": uuid, "module": "tamper", "tamper": {"score": tamper_score, "reasons": reasons}})]
+    refused = []
+    async with httpx.AsyncClient(timeout=5.0, headers={"Authorization": f"Bearer {RISK_ENGINE_TOKEN}"}) as client:
+        for path, body in calls:
+            resp = await client.post(RISK_ENGINE_URL + path, json=body)
+            if resp.status_code >= 500:
+                resp.raise_for_status()
+            if resp.status_code >= 400:
+                refused.append(f"{path} -> {resp.status_code} {resp.text[:200]}")
+    return refused
 
 
-async def _notify_risk_engine(uuid: str, hard_fail: bool, tamper_score: float, reasons: list[str]) -> None:
+async def _notify_risk_engine(uuid: str, hard_fail: bool, tamper_score: Optional[float], reasons: list[str]) -> None:
     """Push this module's flag + tamper score to risk-scoring-engine (see
     ../../services/risk-scoring-engine/README.md for the two-stage contract) — the "forensics"
     flag and the "tamper" score are the two pieces only this module ever sends. Best-effort:
     the risk engine being down must never break this service's own /screen response.
     Circuit-breaker-backed (see risk_engine_breaker.py) so a down risk-scoring-engine fails
     fast instead of costing a full httpx timeout on every single request."""
+    if not RISK_ENGINE_TOKEN:
+        logger.error("uuid=%s RISK_ENGINE_TOKEN not set — result NOT sent to risk-scoring-engine", uuid)
+        return
     try:
-        await _push_to_risk_engine(uuid, hard_fail, tamper_score, reasons)
+        refused = await _push_to_risk_engine(uuid, hard_fail, tamper_score, reasons)
+        for problem in refused:
+            logger.error("uuid=%s risk-scoring-engine refused forensics result: %s", uuid, problem)
     except CircuitBreakerError:
         logger.warning("uuid=%s risk-scoring-engine circuit open, skipping push", uuid)
     except httpx.HTTPError as exc:
@@ -94,6 +107,8 @@ async def screen(
     nationalId: Optional[UploadFile] = File(None),
     drivingLicence: Optional[UploadFile] = File(None),
     permit: Optional[UploadFile] = File(None),
+    voterId: Optional[UploadFile] = File(None),
+    citizenship: Optional[UploadFile] = File(None),
     selfie: Optional[UploadFile] = File(None),
 ) -> dict:
     try:
@@ -102,7 +117,8 @@ async def screen(
         raise HTTPException(400, "documents_present must be valid JSON")
 
     # selfie is excluded: it may be video, and this module only inspects document images.
-    documents = {"passport": passport, "visa": visa, "nationalId": nationalId, "drivingLicence": drivingLicence, "permit": permit}
+    documents = {"passport": passport, "visa": visa, "nationalId": nationalId, "drivingLicence": drivingLicence,
+                 "permit": permit, "voterId": voterId, "citizenship": citizenship}
     for key, file in documents.items():
         if present.get(key) and file is None:
             raise HTTPException(400, f"documents_present says '{key}' is present but no file was sent")
@@ -112,11 +128,9 @@ async def screen(
     logger.info("uuid=%s /screen received: docs=%s", uuid, [k for k, v in present.items() if v and k != "selfie"])
 
     # TODO: real AI-generated-image detection, splice/tamper forensics, and guilloché/
-    # background CNN check. Stub result below keeps the contract honest (score/hard_fail/
-    # reason_codes) without pretending to have run checks that don't exist yet. The score is
-    # pinned to 100 (one of the risk engine's 4 recognized tamper values — see scoring.py's
-    # TAMPER_REASON_MAP) rather than an arbitrary number, now that this pushes upstream too.
-    score, hard_fail, reason_codes = 100, False, ["stub: real forensics checks not implemented yet"]
+    # background CNN check. Until then: score None = "not assessed" (API_CONTRACT.md), never a
+    # made-up number. hard_fail stays False — we found nothing, because we looked at nothing.
+    score, hard_fail, reason_codes = None, False, [NOT_ASSESSED]
 
     logger.info("uuid=%s /screen result: score=%s hard_fail=%s", uuid, score, hard_fail)
     await _notify_risk_engine(uuid, hard_fail, score, reason_codes)

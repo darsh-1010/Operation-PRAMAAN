@@ -1,7 +1,7 @@
 import { generateCase } from './mock'
 import { buildScreeningPayload, dispatchToModules, type ModuleDispatchResult } from './lib/submitScreening'
 import { buildLiveCase } from './lib/buildLiveCase'
-import { pollRiskResult } from './lib/riskEngine'
+import { createSession, pollRiskResult } from './lib/riskEngine'
 import type { DocKey } from './lib/documents'
 import type { ScreeningCase } from './types'
 
@@ -19,14 +19,14 @@ function isUnreachable(d: ModuleDispatchResult): d is ModuleDispatchResult & { r
  * always renders that module's real result rather than a mock.
  */
 export async function runScreening(files: Partial<Record<DocKey, File>>): Promise<ScreeningCase> {
-  const payload = buildScreeningPayload(files)
-  const dispatch = await dispatchToModules(payload)
-
-  if (dispatch.length === 0) {
+  if (!import.meta.env.VITE_OCR_SERVICE_URL && !import.meta.env.VITE_FORENSICS_SERVICE_URL && !import.meta.env.VITE_BIOMETRIC_SERVICE_URL) {
     console.warn('No module service URLs configured (see .env.example) — using mock result.')
     await new Promise((resolve) => setTimeout(resolve, 1000))
-    return generateCase(payload.uuid)
+    return generateCase(crypto.randomUUID())
   }
+
+  const payload = buildScreeningPayload(files, await createSession())
+  const dispatch = await dispatchToModules(payload)
 
   const unreachable = dispatch.filter(isUnreachable)
   if (unreachable.length) {

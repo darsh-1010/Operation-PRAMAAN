@@ -39,20 +39,22 @@ import time
 import uuid as _uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import Optional
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field
 
 import anchor
 import ledger
 import store
+from auth import authorize, caller_module, router as auth_router
 from db import RiskResultDB
 from ledger_routes import router as ledger_router
-from scoring import band_for, tamper_reasons_for, weighted_score
+from schemas import (FlagCheckRequest, FlagCheckResponse, ResultResponse, SubmitScoreRequest,
+                     SubmitScoreResponse)
+from scoring import FORENSICS_UNAVAILABLE_REASON, decide, tamper_reasons_for
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("risk_engine")
@@ -63,13 +65,14 @@ OCR_CALLBACK_URL = os.environ.get("OCR_CALLBACK_URL", "").strip()
 _db = RiskResultDB.get_instance()
 
 
-def _persist(uuid: str, score, decision: str, reasons: list, timed_out: bool = False) -> None:
+def _persist(uuid: str, score, decision: str, reasons: list, evidence: list, timed_out: bool = False) -> None:
     """Durable copy of every finalized decision — normal, hard-fail reject, or timeout —
     alongside store.py's Redis one (see db.py for why both exist). The canonical JSON is what
     gets fingerprinted and later anchored on-chain by anchor.py; it holds no names, document
-    numbers or images, only the decision itself (see LEDGER.md)."""
+    numbers or images — only the decision and the SHA-256 of each uploaded file, so the
+    encrypted evidence the modules stored can later be proven untouched (see LEDGER.md)."""
     record = {
-        "v": 1,
+        "v": 2,
         "result_id": str(_uuid.uuid4()),
         "uuid": uuid,
         "score": score,
@@ -77,6 +80,7 @@ def _persist(uuid: str, score, decision: str, reasons: list, timed_out: bool = F
         "hard_fail": decision == "REJECTED",
         "timed_out": timed_out,
         "reasons": list(reasons),
+        "evidence": sorted(set(evidence)),
         "finalized_at": datetime.now(timezone.utc).isoformat(),
     }
     canonical = ledger.canonical(record)
@@ -105,55 +109,46 @@ def _notify_ocr(uuid: str, score, decision: str) -> None:
 
 
 def _missing_pieces(entry: dict) -> list:
-    missing = []
-    if entry["flag_ocr"] is None:
-        missing.append("flag_ocr")
-    if entry["flag_forensics"] is None:
-        missing.append("flag_forensics")
-    if entry["ocr_score"] is None:
-        missing.append("ocr_score")
-    if entry["tamper_score"] is None:
+    missing = [k for k in ("flag_ocr", "flag_forensics", "ocr_score", "photo_score") if entry[k] is None]
+    if entry["tamper_score"] is None and not entry["tamper_unavailable"]:
         missing.append("tamper_score")
-    if entry["photo_score"] is None:
-        missing.append("photo_score")
     return missing
+
+
+def _finalize(uuid: str, entry: dict, score, decision: str, reasons: list, timed_out: bool = False) -> None:
+    """The one exit for every decision (normal, reject, timeout): result store, audit+ledger,
+    pending cleanup, callback."""
+    # Explainability: logged, persisted (see _persist), and returned via GET /result — but
+    # NOT part of the {uuid, score, decision} payload pushed to OCR_CALLBACK_URL.
+    logger.info("uuid=%s score=%s decision=%s", uuid, score, decision)
+    for reason in reasons:
+        logger.info("  - %s", reason)
+    store.save_result(uuid, score, decision, timed_out=timed_out, reasons=reasons)
+    _persist(uuid, score, decision, reasons, entry["evidence"], timed_out=timed_out)
+    store.clear(uuid)
+    _notify_ocr(uuid, score, decision)
 
 
 def _try_finalize(uuid: str) -> Optional[dict]:
     """
     Checks whether this uuid is ready to be scored: both flags confirmed
-    false, and all 3 scores in. Returns the final result dict if so
-    (saves it to the results store and clears the pending entry), else
-    None if we're still waiting on something.
+    false, and all 3 scores in (forensics may instead have reported it could not assess the
+    images — scoring.decide then caps the decision at MANUAL_REVIEW). Returns the final
+    result dict if so, else None if we're still waiting on something.
     """
     entry = store.get(uuid)
-
-    flags_clear = entry["flag_ocr"] is False and entry["flag_forensics"] is False
-    scores_complete = None not in (
-        entry["ocr_score"],
-        entry["tamper_score"],
-        entry["photo_score"],
-    )
-
-    if not (flags_clear and scores_complete):
+    if _missing_pieces(entry) or entry["flag_ocr"] or entry["flag_forensics"]:
         return None
 
-    final_score = weighted_score(
-        entry["ocr_score"], entry["tamper_score"], entry["photo_score"]
-    )
-    decision = band_for(final_score)
-
-    # Explainability: logged, persisted (see _persist), and returned via GET /result — but
-    # NOT part of the {uuid, score, decision} payload pushed to OCR_CALLBACK_URL.
-    logger.info("uuid=%s score=%s decision=%s", uuid, final_score, decision)
-    for reason in entry["reasons"]:
-        logger.info("  - %s", reason)
-
-    store.save_result(uuid, final_score, decision, reasons=entry["reasons"])
-    _persist(uuid, final_score, decision, entry["reasons"])
-    store.clear(uuid)
-    _notify_ocr(uuid, final_score, decision)
+    tamper = None if entry["tamper_unavailable"] else entry["tamper_score"]
+    final_score, decision = decide(entry["ocr_score"], tamper, entry["photo_score"], entry["review_required"])
+    _finalize(uuid, entry, final_score, decision, entry["reasons"])
     return {"uuid": uuid, "score": final_score, "decision": decision}
+
+
+def _reject(uuid: str) -> None:
+    entry = store.get(uuid)
+    _finalize(uuid, entry, 0, "REJECTED", entry["reasons"])
 
 
 async def _timeout_sweeper():
@@ -169,28 +164,16 @@ async def _timeout_sweeper():
             if age <= store.TIMEOUT_SECONDS:
                 continue
 
-            flags_clear = entry["flag_ocr"] is False and entry["flag_forensics"] is False
-            scores_complete = None not in (
-                entry["ocr_score"], entry["tamper_score"], entry["photo_score"]
-            )
-            if flags_clear and scores_complete:
+            missing = _missing_pieces(entry)
+            if not missing:
                 continue  # about to finalize normally, leave it alone
 
-            missing = _missing_pieces(entry)
             logger.info("uuid=%s TIMEOUT after %.0fs - auto-escalating to MANUAL_REVIEW", uuid, age)
-            logger.info("  - TIMEOUT_ESCALATION: missing=%s", missing)
-            for reason in entry["reasons"]:
-                logger.info("  - %s", reason)
-
-            timeout_reasons = entry["reasons"] + [f"TIMEOUT_ESCALATION: missing={missing}"]
-
             # No numeric score is computable with pieces missing - score
             # is left as null so downstream can't mistake this for an
             # actual (e.g. 0/FAIL) result. Decision is what matters here.
-            store.save_result(uuid, None, "MANUAL_REVIEW", timed_out=True, reasons=timeout_reasons)
-            _persist(uuid, None, "MANUAL_REVIEW", timeout_reasons, timed_out=True)
-            store.clear(uuid)
-            _notify_ocr(uuid, None, "MANUAL_REVIEW")
+            _finalize(uuid, entry, None, "MANUAL_REVIEW",
+                      entry["reasons"] + [f"TIMEOUT_ESCALATION: missing={missing}"], timed_out=True)
 
 
 @asynccontextmanager
@@ -206,33 +189,22 @@ app = FastAPI(title="Praman Risk Scoring Engine", lifespan=lifespan)
 # Dev CORS: the frontend polls GET /result/{uuid} directly from the browser (see
 # frontend/src/lib/riskEngine.ts). Restrict allow_origins to the real frontend origin before
 # this ever leaves a local dev machine — same pattern as the other 3 services.
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+# POST is for /sessions only — the module-facing writes need a bearer token (auth.py).
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
 
 # Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus.
 Instrumentator().instrument(app).expose(app)
 app.include_router(ledger_router)
+app.include_router(auth_router)
 
 
 # ---------------------------------------------------------------------
 # Stage 1: flags
 # ---------------------------------------------------------------------
 
-class FlagCheckRequest(BaseModel):
-    uuid: str
-    module: Literal["ocr", "forensics"]
-    flag: bool
-    reasons: List[str] = Field(default_factory=list)
-
-
-class FlagCheckResponse(BaseModel):
-    uuid: str
-    status: str  # "REJECTED" | "WAITING_ON_OTHER_FLAG" | "WAITING_ON_SCORES" | "DONE"
-    score: Optional[float] = None
-    decision: Optional[str] = None
-
-
 @app.post("/flag-check", response_model=FlagCheckResponse)
-def flag_check(payload: FlagCheckRequest) -> FlagCheckResponse:
+def flag_check(payload: FlagCheckRequest, caller: str = Depends(caller_module)) -> FlagCheckResponse:
+    authorize(caller, "flag", payload.module, payload.uuid)
     logger.info("uuid=%s /flag-check received: module=%s flag=%s", payload.uuid, payload.module, payload.flag)
 
     # This uuid was already finalized (a prior reject, or a normal/timeout completion) and
@@ -242,23 +214,15 @@ def flag_check(payload: FlagCheckRequest) -> FlagCheckResponse:
     if existing is not None:
         return FlagCheckResponse(uuid=payload.uuid, status="DONE", score=existing["score"], decision=existing["decision"])
 
+    store.add_evidence(payload.uuid, payload.evidence)
     if payload.flag:
         # One true flag is enough - reject now, don't wait for the other.
         # TODO: this is also where a "stop other modules" signal should
         # go out, once the other services expose an endpoint for it.
         store.update(payload.uuid, rejected=True)
         store.add_reasons(payload.uuid, payload.reasons or [f"{payload.module}_flag: TRUE"])
-        entry = store.get(payload.uuid)
-        logger.info("uuid=%s score=0 decision=REJECTED", payload.uuid)
-        for reason in entry["reasons"]:
-            logger.info("  - %s", reason)
-        store.save_result(payload.uuid, 0, "REJECTED", reasons=entry["reasons"])
-        _persist(payload.uuid, 0, "REJECTED", entry["reasons"])
-        store.clear(payload.uuid)
-        _notify_ocr(payload.uuid, 0, "REJECTED")
-        return FlagCheckResponse(
-            uuid=payload.uuid, status="REJECTED", score=0, decision="REJECTED"
-        )
+        _reject(payload.uuid)
+        return FlagCheckResponse(uuid=payload.uuid, status="REJECTED", score=0, decision="REJECTED")
 
     field = "flag_ocr" if payload.module == "ocr" else "flag_forensics"
     entry = store.update(payload.uuid, **{field: False})
@@ -279,38 +243,12 @@ def flag_check(payload: FlagCheckRequest) -> FlagCheckResponse:
 # Stage 2: scores
 # ---------------------------------------------------------------------
 
-class OCRScorePayload(BaseModel):
-    score: float = Field(allow_inf_nan=False)
-    reasons: List[str] = Field(default_factory=list)
-
-
-class TamperScorePayload(BaseModel):
-    score: float = Field(allow_inf_nan=False)  # expected: 100, 60, 40, or 0
-
-
-class PhotoScorePayload(BaseModel):
-    score: float = Field(allow_inf_nan=False)
-    hard_fail: bool
-    reasons: List[str] = Field(default_factory=list)
-
-
-class SubmitScoreRequest(BaseModel):
-    uuid: str
-    module: Literal["ocr", "tamper", "photo"]
-    ocr: Optional[OCRScorePayload] = None
-    tamper: Optional[TamperScorePayload] = None
-    photo: Optional[PhotoScorePayload] = None
-
-
-class SubmitScoreResponse(BaseModel):
-    uuid: str
-    status: str  # "REJECTED" | "STORED_WAITING_ON_FLAGS" | "WAITING_ON_OTHER_SCORES" | "DONE"
-    score: Optional[float] = None
-    decision: Optional[str] = None
-
-
 @app.post("/submit-score", response_model=SubmitScoreResponse)
-def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
+def submit_score(payload: SubmitScoreRequest, caller: str = Depends(caller_module)) -> SubmitScoreResponse:
+    authorize(caller, "score", payload.module, payload.uuid)
+    body = getattr(payload, payload.module)
+    if body is None:
+        raise HTTPException(422, f"module '{payload.module}' requires a '{payload.module}' object")
     logger.info("uuid=%s /submit-score received: module=%s", payload.uuid, payload.module)
 
     # Same late/duplicate-arrival guard as /flag-check — see the comment there.
@@ -318,42 +256,32 @@ def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
     if existing is not None:
         return SubmitScoreResponse(uuid=payload.uuid, status="DONE", score=existing["score"], decision=existing["decision"])
 
-    entry = store.get(payload.uuid)
-
-    if entry["rejected"]:
-        return SubmitScoreResponse(
-            uuid=payload.uuid, status="REJECTED", score=0, decision="REJECTED"
-        )
+    store.add_evidence(payload.uuid, payload.evidence)
+    if store.get(payload.uuid)["rejected"]:
+        return SubmitScoreResponse(uuid=payload.uuid, status="REJECTED", score=0, decision="REJECTED")
 
     # Store the incoming score immediately - regardless of whether the
     # flags have cleared yet. A score that arrives early is never lost.
-    # Reasons are stored alongside for explainability (printed at the
-    # end) but never sent back in the DB-update payload.
-    if payload.module == "ocr" and payload.ocr is not None:
-        store.update(payload.uuid, ocr_score=payload.ocr.score)
-        store.add_reasons(payload.uuid, payload.ocr.reasons)
-    elif payload.module == "tamper" and payload.tamper is not None:
-        store.update(payload.uuid, tamper_score=payload.tamper.score)
-        store.add_reasons(payload.uuid, tamper_reasons_for(payload.tamper.score))
-    elif payload.module == "photo" and payload.photo is not None:
-        if payload.photo.hard_fail:
+    # Reasons are stored alongside for explainability.
+    if payload.module == "ocr":
+        store.update(payload.uuid, ocr_score=body.score, review_required=body.review_required)
+        store.add_reasons(payload.uuid, body.reasons)
+    elif payload.module == "tamper":
+        if body.score is None:
+            store.update(payload.uuid, tamper_unavailable=True)
+            store.add_reasons(payload.uuid, body.reasons + [FORENSICS_UNAVAILABLE_REASON])
+        else:
+            store.update(payload.uuid, tamper_score=body.score)
+            store.add_reasons(payload.uuid, tamper_reasons_for(body.score))
+    else:
+        store.add_reasons(payload.uuid, body.reasons)
+        if body.hard_fail:
             # Photo-match's own override - reject even if this arrives
             # before the flag stage has finished.
             store.update(payload.uuid, rejected=True)
-            store.add_reasons(payload.uuid, payload.photo.reasons)
-            entry = store.get(payload.uuid)
-            logger.info("uuid=%s score=0 decision=REJECTED", payload.uuid)
-            for reason in entry["reasons"]:
-                logger.info("  - %s", reason)
-            store.save_result(payload.uuid, 0, "REJECTED", reasons=entry["reasons"])
-            _persist(payload.uuid, 0, "REJECTED", entry["reasons"])
-            store.clear(payload.uuid)
-            _notify_ocr(payload.uuid, 0, "REJECTED")
-            return SubmitScoreResponse(
-                uuid=payload.uuid, status="REJECTED", score=0, decision="REJECTED"
-            )
-        store.update(payload.uuid, photo_score=payload.photo.score)
-        store.add_reasons(payload.uuid, payload.photo.reasons)
+            _reject(payload.uuid)
+            return SubmitScoreResponse(uuid=payload.uuid, status="REJECTED", score=0, decision="REJECTED")
+        store.update(payload.uuid, photo_score=body.score)
 
     result = _try_finalize(payload.uuid)
     if result is not None:
@@ -368,14 +296,6 @@ def submit_score(payload: SubmitScoreRequest) -> SubmitScoreResponse:
 # ---------------------------------------------------------------------
 # Result lookup (works for normal completion, reject, AND timeout)
 # ---------------------------------------------------------------------
-
-class ResultResponse(BaseModel):
-    uuid: str
-    score: Optional[float]
-    decision: str
-    timed_out: bool
-    reasons: List[str] = Field(default_factory=list)
-
 
 @app.get("/result/{uuid}", response_model=ResultResponse)
 def get_result(uuid: str) -> ResultResponse:

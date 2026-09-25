@@ -32,7 +32,8 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
     return (file: File | null) => setFiles((prev) => ({ ...prev, [key]: file ?? undefined }))
   }
 
-  const canRun = Boolean(files[docType])
+  // A live selfie is mandatory: without it nothing binds the person standing here to the document.
+  const canRun = Boolean(files[docType] && files.selfie)
 
   return (
     <div className="space-y-6">
@@ -88,16 +89,18 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
 
           <section className="rounded-xl border border-border p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-text-dim mb-3">
-              3 · Live selfie <span className="normal-case font-normal">(optional — enables face verification)</span>
+              3 · Live selfie <span className="normal-case font-normal">(required — live camera only)</span>
             </p>
             <Dropzone
               label="Selfie"
-              hint="JPG/PNG/MP4"
-              accept="image/*,video/*"
+              hint="Captured live from the camera"
+              accept="image/*"
+              required
               onFile={setFile('selfie')}
               variant="compact"
-              webcamLabel="Capture selfie"
+              webcamLabel="Capture live selfie"
               facingMode="user"
+              cameraOnly
             />
           </section>
 
@@ -128,7 +131,7 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
         </div>
 
         <div className="mt-5 flex flex-col sm:flex-row sm:justify-end items-center gap-3">
-          {!canRun && !loading && <p className="text-xs text-text-dim">Upload the document image to continue</p>}
+          {!canRun && !loading && <p className="text-xs text-text-dim">Add the document image and capture a live selfie to continue</p>}
           {canRun && !loading && <p className="text-xs text-success font-medium">Ready to run</p>}
           <button
             onClick={() => onRun(files)}

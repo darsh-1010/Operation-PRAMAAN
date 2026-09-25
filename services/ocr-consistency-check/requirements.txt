@@ -15,6 +15,11 @@ Pillow>=10.0.0
 # Fuzzy matching
 rapidfuzz>=3.0.0
 
+# Aadhaar Secure QR RSA signature verification + AES-GCM evidence encryption (aadhaar_qr.py, evidence.py)
+cryptography>=42.0.0
+# QR decoding for Aadhaar Secure QR / e-EPIC — OpenCV's detector misses dense QRs (see aadhaar_qr.read_qr_payloads)
+zxing-cpp>=2.2.0
+
 # Nepal Bikram Sambat calendar conversion (Nepali driving licences print DOB in BS, not AD)
 nepali-datetime>=1.0.8
 

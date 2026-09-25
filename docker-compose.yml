@@ -61,6 +61,10 @@ services:
       - POSTGRES_HOST=postgres
       - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004
+      - EVIDENCE_DIR=/data/evidence
+    volumes:
+      # AES-GCM-encrypted uploads (evidence.py), shared with biometric-matching (selfies)
+      - pramaan-evidence:/data/evidence
     depends_on:
       postgres:
         condition: service_healthy
@@ -94,6 +98,9 @@ services:
       - POSTGRES_HOST=postgres
       - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004
+      - EVIDENCE_DIR=/data/evidence
+    volumes:
+      - pramaan-evidence:/data/evidence
     depends_on:
       postgres:
         condition: service_healthy
@@ -180,6 +187,7 @@ services:
 
 volumes:
   pramaan-anvil-data:
+  pramaan-evidence:
   pramaan-postgres-data:
   pramaan-prometheus-data:
   pramaan-grafana-data:

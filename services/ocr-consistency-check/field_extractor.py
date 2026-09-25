@@ -126,7 +126,8 @@ def extract_document_fields(
     # Document Number regexes
     viz_id_raw = (
         extract_regex_value(full_text, r"\b([A-PR-WY][0-9O]{7,8})\b") if doc_type in ("PASSPORT", "VISA")
-        else (extract_regex_value(full_text, r"\b([0-9]{4}\s+[0-9]{4}\s+[0-9]{4})\b") or extract_regex_value(full_text, r"\b([A-Z]{5}[0-9]{4}[A-Z])\b") or extract_regex_value(full_text, r"\b([0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{4,5})\b"))
+        else (extract_regex_value(full_text, r"\b([0-9]{4}\s+[0-9]{4}\s+[0-9]{4})\b") or extract_regex_value(full_text, r"\b([A-Z]{5}[0-9]{4}[A-Z])\b") or extract_regex_value(full_text, r"\b([0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{4,5})\b")
+              or extract_regex_value(full_text.upper(), r"\b([A-Z]{3}[0-9]{7})\b"))
     ) or extract_labeled_field(lines, r"\b(PASSPORT\s*(?:NO\.?|NUMBER)|VISA\s*(?:NO\.?|NUMBER)|ID\s*(?:NO\.?|NUMBER)|DOCUMENT\s*(?:NO\.?|NUMBER)|LICEN[SC]E\s*(?:NO\.?|NUMBER)|नम्बर|नं)\b", disallowed_preceding=r"(POST|ISSUING|CONTROL|BATCH|PHONE)\b")
 
     viz_name = normalize_name(viz_name_raw) if viz_name_raw else None

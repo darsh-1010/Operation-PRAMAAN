@@ -36,9 +36,12 @@ TIMEOUT_SECONDS = int(os.environ.get("RISK_ENGINE_TIMEOUT_SECONDS", "300"))
 # rather than Redis silently expiring it out from under the sweeper first.
 _PENDING_TTL_SECONDS = TIMEOUT_SECONDS + 120
 _RESULT_TTL_SECONDS = 24 * 60 * 60  # finalized results stay pollable for a day
+# A screening id is only accepted if this service issued it (POST /sessions) within this window.
+SESSION_TTL_SECONDS = int(os.environ.get("RISK_SESSION_TTL_SECONDS", "3600"))
 
-_PENDING_FIELDS = ("flag_ocr", "flag_forensics", "ocr_score", "tamper_score", "photo_score", "rejected")
-_BOOL_FIELDS = {"flag_ocr", "flag_forensics", "rejected"}
+_PENDING_FIELDS = ("flag_ocr", "flag_forensics", "ocr_score", "tamper_score", "photo_score", "rejected",
+                   "tamper_unavailable", "review_required")
+_BOOL_FIELDS = {"flag_ocr", "flag_forensics", "rejected", "tamper_unavailable", "review_required"}
 
 
 def _new_entry() -> dict:
@@ -48,7 +51,10 @@ def _new_entry() -> dict:
         "ocr_score": None,
         "tamper_score": None,
         "photo_score": None,
+        "tamper_unavailable": False,  # forensics reported it could not assess the images
+        "review_required": False,  # a module said a human must look, whatever the score
         "reasons": [],
+        "evidence": [],  # "<kind>:<sha256>" of every uploaded file, sealed into the ledger record
         "rejected": False,
         "created_at": time.time(),
     }
@@ -75,6 +81,7 @@ _redis = _connect_redis()
 _lock = Lock()
 _store: dict = {}
 _results: dict = {}
+_sessions: dict = {}  # uuid -> expiry epoch seconds
 
 
 def _pending_key(uuid: str) -> str:
@@ -89,14 +96,23 @@ def _result_key(uuid: str) -> str:
     return f"risk:result:{uuid}"
 
 
+def _evidence_key(uuid: str) -> str:
+    return f"risk:pending:{uuid}:evidence"
+
+
+def _session_key(uuid: str) -> str:
+    return f"risk:session:{uuid}"
+
+
 def _touch_ttl(uuid: str) -> None:
     _redis.expire(_pending_key(uuid), _PENDING_TTL_SECONDS)
     _redis.expire(_reasons_key(uuid), _PENDING_TTL_SECONDS)
+    _redis.expire(_evidence_key(uuid), _PENDING_TTL_SECONDS)
     _redis.sadd("risk:pending:index", uuid)
     _redis.expire("risk:pending:index", _PENDING_TTL_SECONDS)
 
 
-def _decode_entry(uuid: str, raw: dict, reasons: list) -> dict:
+def _decode_entry(uuid: str, raw: dict, reasons: list, evidence: list) -> dict:
     entry = _new_entry()
     entry["created_at"] = float(raw.get("created_at", time.time()))
     for field in _PENDING_FIELDS:
@@ -104,7 +120,12 @@ def _decode_entry(uuid: str, raw: dict, reasons: list) -> dict:
             continue
         entry[field] = raw[field] == "1" if field in _BOOL_FIELDS else float(raw[field])
     entry["reasons"] = reasons
+    entry["evidence"] = evidence
     return entry
+
+
+def _read(uuid: str, raw: dict) -> dict:
+    return _decode_entry(uuid, raw, _redis.lrange(_reasons_key(uuid), 0, -1), _redis.lrange(_evidence_key(uuid), 0, -1))
 
 
 def get(uuid: str) -> dict:
@@ -119,8 +140,7 @@ def get(uuid: str) -> dict:
         _redis.hset(_pending_key(uuid), mapping={"created_at": time.time()})
         _touch_ttl(uuid)
         return _new_entry()
-    reasons = _redis.lrange(_reasons_key(uuid), 0, -1)
-    return _decode_entry(uuid, raw, reasons)
+    return _read(uuid, raw)
 
 
 def update(uuid: str, **fields) -> dict:
@@ -149,13 +169,26 @@ def add_reasons(uuid: str, new_reasons: list) -> dict:
     return get(uuid)
 
 
+def add_evidence(uuid: str, items: list) -> dict:
+    if _redis is None:
+        with _lock:
+            entry = _store.setdefault(uuid, _new_entry())
+            entry["evidence"] = entry["evidence"] + [i for i in items if i not in entry["evidence"]]
+            return dict(entry)
+
+    if items:
+        _redis.rpush(_evidence_key(uuid), *items)
+    _touch_ttl(uuid)
+    return get(uuid)
+
+
 def clear(uuid: str) -> None:
     if _redis is None:
         with _lock:
             _store.pop(uuid, None)
         return
 
-    _redis.delete(_pending_key(uuid), _reasons_key(uuid))
+    _redis.delete(_pending_key(uuid), _reasons_key(uuid), _evidence_key(uuid))
     _redis.srem("risk:pending:index", uuid)
 
 
@@ -171,8 +204,7 @@ def all_entries() -> dict:
         if not raw:
             _redis.srem("risk:pending:index", uuid)  # expired already, tidy the index
             continue
-        reasons = _redis.lrange(_reasons_key(uuid), 0, -1)
-        out[uuid] = _decode_entry(uuid, raw, reasons)
+        out[uuid] = _read(uuid, raw)
     return out
 
 
@@ -198,3 +230,20 @@ def get_result(uuid: str):
             return _results.get(uuid)
     raw = _redis.get(_result_key(uuid))
     return json.loads(raw) if raw else None
+
+
+def issue_session(uuid: str) -> None:
+    """Records a server-issued screening id. Modules may only report on ids issued here, so a
+    caller can't invent ids or re-use a finalized one's echoed decision for a new person."""
+    if _redis is None:
+        with _lock:
+            _sessions[uuid] = time.time() + SESSION_TTL_SECONDS
+        return
+    _redis.set(_session_key(uuid), "1", ex=SESSION_TTL_SECONDS)
+
+
+def session_exists(uuid: str) -> bool:
+    if _redis is None:
+        with _lock:
+            return _sessions.get(uuid, 0) > time.time()
+    return bool(_redis.exists(_session_key(uuid)))

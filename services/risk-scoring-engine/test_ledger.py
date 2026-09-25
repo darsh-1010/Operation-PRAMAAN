@@ -77,7 +77,7 @@ def _fresh_env():
 def _decide(n: int) -> list[str]:
     uuids = [str(_uuid.uuid4()) for _ in range(n)]
     for i, u in enumerate(uuids):
-        main._persist(u, 50.0 + i + 0.123456789, "MANUAL_REVIEW", [f"REASON_{i}"])
+        main._persist(u, 50.0 + i + 0.123456789, "MANUAL_REVIEW", [f"REASON_{i}"], [])
     return uuids
 
 

@@ -32,10 +32,25 @@ def band_for(score: float) -> str:
     return "FAIL"
 
 
-def weighted_score(ocr_score: float, tamper_score: float, photo_score: float) -> float:
-    raw = (
-        WEIGHTS["ocr"] * ocr_score
-        + WEIGHTS["tamper"] * tamper_score
-        + WEIGHTS["photo"] * photo_score
-    )
+FORENSICS_UNAVAILABLE_REASON = "FORENSICS_UNAVAILABLE: image forensics did not run — decision capped at MANUAL_REVIEW"
+
+
+def weighted_score(ocr_score: float, tamper_score, photo_score: float) -> float:
+    """tamper_score None = forensics could not assess the images: the score is renormalized over
+    the modules that did run, rather than handing out forensics' 40% for free (a stub that
+    always said 100 let a forged document with mediocre OCR + face scores reach PASS)."""
+    if tamper_score is None:
+        raw = (WEIGHTS["ocr"] * ocr_score + WEIGHTS["photo"] * photo_score) / (WEIGHTS["ocr"] + WEIGHTS["photo"])
+    else:
+        raw = WEIGHTS["ocr"] * ocr_score + WEIGHTS["tamper"] * tamper_score + WEIGHTS["photo"] * photo_score
     return round(raw, 2)
+
+
+def decide(ocr_score: float, tamper_score, photo_score: float, review_required: bool = False) -> tuple[float, str]:
+    """Final (score, decision). Without forensics, or when a module demands a human look, a case
+    can be FAIL or MANUAL_REVIEW, never PASS."""
+    score = weighted_score(ocr_score, tamper_score, photo_score)
+    decision = band_for(score)
+    if (tamper_score is None or review_required) and decision == "PASS":
+        decision = "MANUAL_REVIEW"
+    return score, decision

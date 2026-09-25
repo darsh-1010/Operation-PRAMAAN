@@ -11,6 +11,18 @@ export interface RiskResult {
 
 const RISK_URL = import.meta.env.VITE_RISK_SERVICE_URL
 
+/** Every screening id is issued by the risk engine (POST /sessions): modules may only report
+ * results against ids it issued, so ids can't be invented or re-used. No risk engine = no
+ * screening — throws rather than falling back to a browser-made id. */
+export async function createSession(): Promise<string> {
+  if (!RISK_URL) throw new Error('VITE_RISK_SERVICE_URL is not set (see .env.example)')
+  const res = await fetch(`${RISK_URL.replace(/\/$/, '')}/sessions`, { method: 'POST' })
+  if (!res.ok) throw new Error(`Could not start a screening: risk engine answered HTTP ${res.status}`)
+  const body = (await res.json()) as { uuid?: unknown }
+  if (typeof body.uuid !== 'string') throw new Error('Risk engine returned no screening id')
+  return body.uuid
+}
+
 /** Polls GET /result/{uuid} a handful of times. This resolves fast for an outright reject
  * (any module's hard_fail short-circuits the risk engine immediately) or once every module
  * has pushed a score. It will NOT resolve within this window for a "needs fusion" case while

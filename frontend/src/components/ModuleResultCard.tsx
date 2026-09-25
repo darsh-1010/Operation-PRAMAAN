@@ -10,7 +10,14 @@ export default function ModuleResultCard({ module }: { module: ModuleResult }) {
           <span className="text-[10px] font-medium rounded-full bg-danger-dim text-danger px-2 py-0.5">HARD FAIL</span>
         )}
       </div>
-      <ScoreBar score={module.score} />
+      {module.notAssessed ? (
+        <p className="text-xs font-medium text-warning">Not assessed — this module could not check the submission</p>
+      ) : (
+        <ScoreBar score={module.score} />
+      )}
+      {module.reviewRequired && (
+        <p className="mt-1.5 text-[11px] font-medium text-warning">Officer review required</p>
+      )}
 
       <ul className="mt-3 space-y-2">
         {module.subChecks.map((check, i) => (

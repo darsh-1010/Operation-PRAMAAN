@@ -64,7 +64,8 @@ def main() -> None:
     # A valid submission must return the API_CONTRACT.md response shape.
     status, result = _post_screen({"passport": True}, {"passport": TINY_PNG})
     assert status == 200, result
-    assert isinstance(result["score"], (int, float))
+    # Nothing is implemented yet, so the honest answer is "not assessed" (null), never a number.
+    assert result["score"] is None and result["reason_codes"][0].startswith("FORENSICS_NOT_IMPLEMENTED")
     assert isinstance(result["hard_fail"], bool)
     assert isinstance(result["reason_codes"], list)
 

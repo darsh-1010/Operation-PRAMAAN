@@ -23,13 +23,20 @@ export default function App() {
   const [cases, setCases] = useState<ScreeningCase[]>(() => generateRecentCases(8))
   const [active, setActive] = useState<ScreeningCase | null>(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleRun(files: Partial<Record<DocKey, File>>) {
     setLoading(true)
-    const result = await runScreening(files)
-    setCases((prev) => [result, ...prev])
-    setActive(result)
-    setLoading(false)
+    setError(null)
+    try {
+      const result = await runScreening(files)
+      setCases((prev) => [result, ...prev])
+      setActive(result)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
+    }
   }
 
   const copy = TAB_COPY[tab]
@@ -40,6 +47,11 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar title={copy.title} subtitle={copy.subtitle} theme={theme} onToggleTheme={toggle} onOpenMenu={() => setMenuOpen(true)} />
         <main className="flex-1 px-4 sm:px-6 py-6">
+          {error && (
+            <div role="alert" className="mb-4 rounded-xl border border-danger/30 bg-danger-dim px-4 py-2.5 text-sm text-danger">
+              Screening could not run: {error}
+            </div>
+          )}
           {tab === 'stats' ? (
             <StatisticsTab cases={cases} />
           ) : tab === 'ledger' ? (

@@ -22,3 +22,6 @@ graphify-out/
 
 # scratch test datasets (large binary test fixtures, not source)
 dataset-raw/
+
+# Encrypted evidence written by local (non-docker) runs — see services/*/evidence.py
+.evidence/

@@ -14,6 +14,9 @@ interface Props {
   variant?: 'box' | 'compact'
   webcamLabel?: string
   facingMode?: 'user' | 'environment'
+  /** Live camera capture only — no file picker, no drag & drop (used for the selfie, so a stored
+   *  photo of someone else can't be submitted through the UI). */
+  cameraOnly?: boolean
 }
 
 export default function Dropzone({
@@ -25,6 +28,7 @@ export default function Dropzone({
   variant = 'box',
   webcamLabel = 'Webcam',
   facingMode = 'environment',
+  cameraOnly = false,
 }: Props) {
   const [file, setFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -110,13 +114,15 @@ export default function Dropzone({
           >
             {webcamLabel}
           </button>
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="rounded-lg border border-border bg-surface-2 px-4 py-2 text-sm font-medium hover:border-accent/60 cursor-pointer"
-          >
-            Upload
-          </button>
+          {!cameraOnly && (
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              className="rounded-lg border border-border bg-surface-2 px-4 py-2 text-sm font-medium hover:border-accent/60 cursor-pointer"
+            >
+              Upload
+            </button>
+          )}
         </div>
         {(file || error) && (
           <div className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${error ? 'border-danger/60 bg-danger-dim' : 'border-success/60 bg-success-dim'}`}>
@@ -198,6 +204,7 @@ export default function Dropzone({
         {label}
         {required && <span className="text-danger"> *</span>}
       </p>
+      <p className="text-[11px] text-text-dim text-center">{hint}</p>
     </div>
   )
 }

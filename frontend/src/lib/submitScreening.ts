@@ -17,9 +17,9 @@ export interface ScreeningPayload {
 
 /** Every file here has already passed src/lib/fileGuard.ts (Dropzone never calls onFile with
  * one that failed the guard) — this only assembles what already-validated input into a payload. */
-export function buildScreeningPayload(files: Partial<Record<DocKey, File>>): ScreeningPayload {
+export function buildScreeningPayload(files: Partial<Record<DocKey, File>>, uuid: string): ScreeningPayload {
   const documentsPresent = Object.fromEntries(ALL_KEYS.map((k) => [k, Boolean(files[k])])) as Record<DocKey, boolean>
-  return { uuid: crypto.randomUUID(), documentsPresent, files }
+  return { uuid, documentsPresent, files }
 }
 
 function toFormData({ uuid, documentsPresent, files }: ScreeningPayload): FormData {
@@ -41,9 +41,12 @@ const MODULE_ENDPOINTS: { name: string; url: string | undefined }[] = [
 
 /** A module's POST /screen response — API_CONTRACT.md's exact shape. */
 export interface ModuleResponse {
-  score: number
+  /** null = the module could not assess this submission at all (e.g. forensics not built yet) */
+  score: number | null
   hard_fail: boolean
   reason_codes: string[]
+  /** the module says a human must look at this whatever the score (e.g. Aadhaar QR unverifiable) */
+  review_required?: boolean
   latency_ms?: number
   details?: {
     claimed_name?: string | null
@@ -59,7 +62,7 @@ export interface ModuleResponse {
 function isModuleResponse(body: unknown): body is ModuleResponse {
   if (typeof body !== 'object' || body === null) return false
   const b = body as Record<string, unknown>
-  return typeof b.score === 'number' && typeof b.hard_fail === 'boolean' && Array.isArray(b.reason_codes)
+  return (typeof b.score === 'number' || b.score === null) && typeof b.hard_fail === 'boolean' && Array.isArray(b.reason_codes)
 }
 
 export type ModuleDispatchResult =

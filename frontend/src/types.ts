@@ -13,6 +13,10 @@ export interface ModuleResult {
   score: number // 0-100, average of subChecks
   hardFail: boolean
   subChecks: SubCheck[]
+  /** the module ran but could not assess anything (e.g. forensics not built) — score is meaningless */
+  notAssessed?: boolean
+  /** the module demands a human look whatever the score */
+  reviewRequired?: boolean
 }
 
 export type Decision = 'ACCEPT' | 'MANUAL_REVIEW' | 'REJECT'

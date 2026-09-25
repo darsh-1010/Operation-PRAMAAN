@@ -99,11 +99,12 @@ def main() -> None:
     check("response has hard_fail (bool)", isinstance(result.get("hard_fail"), bool), str(result))
     check("response has reason_codes (list)", isinstance(result.get("reason_codes"), list), str(result))
 
-    # 2. A selfie that isn't a decodable image is accepted (assumed video) — but not empty.
+    # 2. A selfie that isn't a decodable still image is rejected: video liveness isn't built, so
+    #    accepting one would mean accepting a selfie nothing ever checked.
     status, result = _post_screen({"selfie": True}, {"selfie": b"not-a-real-video-but-not-empty-either"})
-    check("non-image selfie accepted (assumed video)", status == 200, f"got {status}: {result}")
+    check("non-image selfie rejected", status == 400, f"got {status}: {result}")
 
-    # 3. A document photo that isn't a real image must be rejected, unlike the lenient selfie.
+    # 3. A document photo that isn't a real image must be rejected too.
     status, _ = _post_screen({"passport": True}, {"passport": b"not an image"})
     check("non-image document rejected", status == 400, f"got {status}")
 
@@ -127,8 +128,9 @@ def main() -> None:
     # Should mention FACE_NOT_DETECTED somewhere
     all_reasons = " ".join(result.get("reason_codes", []))
     check("no-face mentions detection failure",
-          "FACE_NOT_DETECTED" in all_reasons or "no_face_matching" in all_reasons,
+          "FACE_NOT_DETECTED" in all_reasons and "FACE_MATCH_NOT_PERFORMED" in all_reasons,
           all_reasons)
+    check("no face match means score 0, not a neutral 50", result.get("score") == 0, str(result))
     check("no-face does NOT hard fail", result.get("hard_fail") is False, str(result))
 
     # 6. Score is within valid range (0-100).
@@ -137,7 +139,8 @@ def main() -> None:
     # 7. Empty documents_present with no files should return 200 (nothing to check).
     status, result = _post_screen({}, {})
     check("empty submission returns 200", status == 200, f"got {status}: {result}")
-    check("empty submission score is valid", 0 <= result.get("score", -1) <= 100, str(result))
+    check("empty submission scores 0 and says the selfie is missing",
+          result.get("score") == 0 and any(r.startswith("SELFIE_MISSING") for r in result.get("reason_codes", [])), str(result))
 
     # ========================================================================
     # Summary

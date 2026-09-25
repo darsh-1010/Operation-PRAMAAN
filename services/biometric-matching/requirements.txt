@@ -23,6 +23,9 @@ redis>=5.0.0
 # Process-pool isolation for native-library inference calls (see inference_pool.py)
 loky>=3.4.0
 
+# AES-GCM encryption of retained selfie evidence (evidence.py)
+cryptography>=42.0.0
+
 # Circuit breaker for the risk-scoring-engine push (see risk_engine_breaker.py)
 aiobreaker>=1.2.0
 

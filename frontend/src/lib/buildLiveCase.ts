@@ -32,28 +32,29 @@ function toModuleResult(name: string, dispatch: ModuleDispatchResult | undefined
   if (!dispatch) return unreachable(meta, 'No service URL configured (see .env.example)')
   if (isUnreachable(dispatch)) return unreachable(meta, dispatch.error)
 
-  const { score, hard_fail, reason_codes } = dispatch.response
+  const { score, hard_fail, reason_codes, review_required } = dispatch.response
   const codes = reason_codes.length ? reason_codes : ['no reason codes returned']
   // ponytail: real modules return a flat reason_codes list, not per-check pass/fail — every
   // code is shown against the module's one verdict rather than guessed apart into sub-checks.
-  const subChecks: SubCheck[] = codes.map((code) => ({ label: code, score, passed: !hard_fail, reason: hard_fail ? code : undefined }))
-  return { id: meta.id, label: meta.label, score, hardFail: hard_fail, subChecks }
+  const subChecks: SubCheck[] = codes.map((code) => ({ label: code, score: score ?? 0, passed: !hard_fail && score !== null, reason: hard_fail || score === null ? code : undefined }))
+  return { id: meta.id, label: meta.label, score: score ?? 0, hardFail: hard_fail, subChecks, notAssessed: score === null, reviewRequired: Boolean(review_required) }
 }
 
-/** Fuses the 3 modules' scores the same way risk-scoring-engine does, for when its own fused
- * result isn't available yet. Any hard_fail, or any module we couldn't reach, forces a
- * conservative call (REJECT / MANUAL_REVIEW) rather than guessing past missing data. */
+/** Fuses the 3 modules' scores the same way risk-scoring-engine does (scoring.py: decide), for
+ * when its own fused result isn't available yet. Any hard_fail, any module we couldn't reach, a
+ * module that assessed nothing, or one demanding review forces a conservative call — never ACCEPT. */
 function fuseClientSide(dispatch: ModuleDispatchResult[], modules: ModuleResult[]): { decision: Decision; riskScore: number } {
   const anyHardFail = modules.some((m) => m.hardFail)
   const anyUnreachable = dispatch.some((d) => !d.reachable)
-  const byId = Object.fromEntries(modules.map((m) => [m.id, m.score])) as Record<ModuleResult['id'], number>
-  const riskScore = Math.round(
-    WEIGHTS.ocr * (byId.ocr ?? 0) + WEIGHTS.forensics * (byId.forensics ?? 0) + WEIGHTS.biometric * (byId.biometric ?? 0),
-  )
+  const assessed = modules.filter((m) => !m.notAssessed)
+  const totalWeight = assessed.reduce((sum, m) => sum + WEIGHTS[m.id], 0)
+  // Renormalized over the modules that actually assessed something, like the risk engine.
+  const riskScore = totalWeight ? Math.round(assessed.reduce((sum, m) => sum + WEIGHTS[m.id] * m.score, 0) / totalWeight) : 0
 
   if (anyHardFail) return { decision: 'REJECT', riskScore }
   if (anyUnreachable) return { decision: 'MANUAL_REVIEW', riskScore }
-  if (riskScore >= 80) return { decision: 'ACCEPT', riskScore }
+  const mustReview = modules.some((m) => m.notAssessed || m.reviewRequired)
+  if (riskScore >= 80) return { decision: mustReview ? 'MANUAL_REVIEW' : 'ACCEPT', riskScore }
   if (riskScore >= 40) return { decision: 'MANUAL_REVIEW', riskScore }
   return { decision: 'REJECT', riskScore }
 }
