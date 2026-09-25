@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 venv/
 README.md
+
+# macOS AppleDouble metadata files (the repo lives on an exFAT drive) — unreadable by the docker build context
+._*
+**/._*

@@ -98,7 +98,7 @@ class CandidateSearchEngine:
             sql_doc = """
                 SELECT entry_id, kind, doc_number, reason, source
                 FROM watchlist_entries
-                WHERE active = TRUE AND UPPER(TRIM(doc_number)) = %s;
+                WHERE CAST(active AS INTEGER) = 1 AND UPPER(TRIM(doc_number)) = %s;
             """
             doc_rows = self.db.query(sql_doc, (clean_num,))
             for r in doc_rows:
@@ -118,7 +118,7 @@ class CandidateSearchEngine:
             sql_person = """
                 SELECT entry_id, kind, full_name, reason, source
                 FROM watchlist_entries
-                WHERE active = TRUE AND UPPER(TRIM(full_name)) = %s AND dob = %s;
+                WHERE CAST(active AS INTEGER) = 1 AND UPPER(TRIM(full_name)) = %s AND dob = %s;
             """
             person_rows = self.db.query(sql_person, (clean_name, dob))
             for r in person_rows:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid as _uuid
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, s
 
 import aadhaar_qr
 import evidence
+from inference_pool import InferenceCrashed, run_isolated
 from cross_document import cross_check_documents
 from db import DatabaseManager
 from decision_models import ValidationCheckRecord
@@ -34,15 +36,42 @@ SLOT_COUNTRY = {"citizenship": "NPL"}
 UIDAI_KEYS = aadhaar_qr.load_uidai_keys()
 
 
-def _screen_document(key: str, filename: str, content: bytes) -> tuple:
-    """Blocking: generic OCR pipeline + identity-document checks for one uploaded file."""
-    ingested, ocr_res, parsed, _, decision, watchlist_hits, _ = run_screening_pipeline(content, filename, SLOT_COUNTRY.get(key))
+def _screen_document(key: str, filename: str, content: bytes, force_tesseract: bool = False) -> tuple:
+    """Runs in an isolated worker process (inference_pool.run_isolated): generic OCR pipeline +
+    identity-document checks for one uploaded file. force_tesseract = the PaddleOCR fallback."""
+    previous = os.environ.get("OCR_ENGINE")
+    if force_tesseract:
+        os.environ["OCR_ENGINE"] = "tesseract"  # ocr_engine reads this per call; restored below
+    try:
+        ingested, ocr_res, parsed, _, decision, watchlist_hits, _ = run_screening_pipeline(content, filename, SLOT_COUNTRY.get(key))
+    finally:
+        if force_tesseract:
+            os.environ.pop("OCR_ENGINE") if previous is None else os.environ.__setitem__("OCR_ENGINE", previous)
     idv = verify_identity_document(key, ingested.images[0], ocr_res.full_text, parsed, UIDAI_KEYS)
+    if parsed.doc_type in ("PASSPORT", "VISA") and not (parsed.mrz_result and parsed.mrz_result.valid_format):
+        # Every passport/visa has an MRZ. Unread = its check digits were never verified, so a
+        # tampered number would pass unseen — never let that become an automatic ACCEPT.
+        idv.add("MRZ_PRESENCE", "WARN", "MRZ could not be read, so its check digits were not verified — rescan the "
+                "bio-data page flat and in focus", "MRZ_NOT_READ", "HIGH", review=True)
+    if force_tesseract:
+        idv.add("OCR_ENGINE", "WARN", "Primary OCR engine crashed on this image; read with the Tesseract fallback",
+                "OCR_FALLBACK_TESSERACT", "MEDIUM")
     decision.validation_checks.extend(idv.checks)
     decision.reason_codes.extend(idv.reasons)
     if idv.hard_fail:
         decision.hard_fail, decision.score, decision.canonical_score = True, 0.0, 0.0
     return ingested, ocr_res, parsed, decision, watchlist_hits, idv
+
+
+async def _screen_isolated(key: str, filename: str, content: bytes) -> tuple:
+    """PaddleOCR is known to segfault on some builds (reproduced on aarch64 Docker): a native
+    crash can't be caught in-process and used to kill the whole server worker. Run it in an
+    isolated process; if that process dies, retry once with Tesseract instead."""
+    try:
+        return await run_isolated(_screen_document, key, filename, content)
+    except InferenceCrashed as err:
+        logger.error("OCR worker crashed on %s (%s) — retrying with Tesseract", key, err)
+        return await run_isolated(_screen_document, key, filename, content, True)
 
 
 def _keep_evidence(session: str, uploads: list) -> tuple[list[str], list[str]]:
@@ -93,9 +122,13 @@ async def screen(
     start_t = time.perf_counter()
     evidence_refs, evidence_problems = _keep_evidence(session, uploads)
     try:
-        results = await asyncio.gather(*[asyncio.to_thread(_screen_document, k, fn, c) for k, fn, c in uploads])
+        results = await asyncio.gather(*[_screen_isolated(k, fn, c) for k, fn, c in uploads])
     except ValueError as err:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"File ingestion error: {err}")
+    except InferenceCrashed as err:
+        # Both engines died. Don't push anything: the risk engine's timeout sweeper escalates
+        # this id to MANUAL_REVIEW, which is exactly the right outcome.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"OCR engines crashed: {err}")
 
     return await _finish(session, db, uploads, results, evidence_refs, evidence_problems, start_t)
 
