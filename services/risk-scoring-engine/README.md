@@ -68,6 +68,8 @@ back and collect it.
 - `scoring.py` — the actual math: weights, bands, tamper-score → reason
   mapping.
 - `main.py` — FastAPI app, `POST /flag-check` and `POST /submit-score`.
+- `ledger.py`, `ledger_db.py`, `chain.py`, `anchor.py`, `ledger_routes.py`, `contracts/` —
+  blockchain anchoring of every final decision + `GET /ledger/*`. See [LEDGER.md](LEDGER.md).
 - `requirements.txt`
 
 ## Module payload shapes (confirmed so far — may still change)

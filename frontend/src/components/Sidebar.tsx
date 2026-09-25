@@ -1,8 +1,9 @@
-export type Tab = 'stats' | 'screening'
+export type Tab = 'stats' | 'screening' | 'ledger'
 
 const NAV_ITEMS: { tab: Tab; label: string; icon: string }[] = [
   { tab: 'stats', label: 'Statistics', icon: 'M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6V11h-6v9Zm0-16v5h6V4h-6Z' },
   { tab: 'screening', label: 'New Screening', icon: 'M12 5v14M5 12h14' },
+  { tab: 'ledger', label: 'Blockchain Ledger', icon: 'M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7' },
 ]
 
 const SOON_ITEMS = [

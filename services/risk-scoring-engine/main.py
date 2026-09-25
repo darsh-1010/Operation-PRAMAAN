@@ -38,6 +38,7 @@ import os
 import time
 import uuid as _uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 import requests
@@ -46,8 +47,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
+import anchor
+import ledger
 import store
 from db import RiskResultDB
+from ledger_routes import router as ledger_router
 from scoring import band_for, tamper_reasons_for, weighted_score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -61,8 +65,22 @@ _db = RiskResultDB.get_instance()
 
 def _persist(uuid: str, score, decision: str, reasons: list, timed_out: bool = False) -> None:
     """Durable copy of every finalized decision — normal, hard-fail reject, or timeout —
-    alongside store.py's in-memory one (see db.py for why both exist)."""
-    _db.save_risk_result(str(_uuid.uuid4()), uuid, score, decision, decision == "REJECTED", timed_out, reasons)
+    alongside store.py's Redis one (see db.py for why both exist). The canonical JSON is what
+    gets fingerprinted and later anchored on-chain by anchor.py; it holds no names, document
+    numbers or images, only the decision itself (see LEDGER.md)."""
+    record = {
+        "v": 1,
+        "result_id": str(_uuid.uuid4()),
+        "uuid": uuid,
+        "score": score,
+        "decision": decision,
+        "hard_fail": decision == "REJECTED",
+        "timed_out": timed_out,
+        "reasons": list(reasons),
+        "finalized_at": datetime.now(timezone.utc).isoformat(),
+    }
+    canonical = ledger.canonical(record)
+    _db.save_risk_result(record, canonical, ledger.leaf_hash(canonical).hex())
 
 
 def _notify_ocr(uuid: str, score, decision: str) -> None:
@@ -178,8 +196,10 @@ async def _timeout_sweeper():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     sweeper_task = asyncio.create_task(_timeout_sweeper())
+    anchor_task = asyncio.create_task(anchor.run_forever(_db))
     yield
     sweeper_task.cancel()
+    anchor_task.cancel()
 
 
 app = FastAPI(title="Praman Risk Scoring Engine", lifespan=lifespan)
@@ -190,6 +210,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], a
 
 # Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus.
 Instrumentator().instrument(app).expose(app)
+app.include_router(ledger_router)
 
 
 # ---------------------------------------------------------------------
@@ -259,16 +280,16 @@ def flag_check(payload: FlagCheckRequest) -> FlagCheckResponse:
 # ---------------------------------------------------------------------
 
 class OCRScorePayload(BaseModel):
-    score: float
+    score: float = Field(allow_inf_nan=False)
     reasons: List[str] = Field(default_factory=list)
 
 
 class TamperScorePayload(BaseModel):
-    score: float  # expected: 100, 60, 40, or 0
+    score: float = Field(allow_inf_nan=False)  # expected: 100, 60, 40, or 0
 
 
 class PhotoScorePayload(BaseModel):
-    score: float
+    score: float = Field(allow_inf_nan=False)
     hard_fail: bool
     reasons: List[str] = Field(default_factory=list)
 

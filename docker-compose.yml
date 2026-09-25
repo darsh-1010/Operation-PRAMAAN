@@ -111,10 +111,46 @@ services:
     environment:
       - POSTGRES_HOST=postgres
       - REDIS_URL=redis://redis:6379/0
+      # Local Anvil by default; export PRAMAN_CHAIN_RPC_URL to point at Polygon Amoy / Besu.
+      - CHAIN_RPC_URL=${PRAMAN_CHAIN_RPC_URL:-http://anvil:8545}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      ledger-deploy:
+        condition: service_completed_successfully
+
+  # Local EVM chain for the decision ledger (see services/risk-scoring-engine/LEDGER.md).
+  # State is dumped to a volume every 10s so anchors survive `docker compose down/up`.
+  # Dev/demo only — production anchors to Polygon or a permissioned Besu network instead.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    restart: unless-stopped
+    user: root  # the image's default user can't write the named volume
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-time", "2",
+                 "--state", "/anvil/state.json", "--state-interval", "10"]
+    ports:
+      - "8545:8545"
+    volumes:
+      - pramaan-anvil-data:/anvil
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: deploys PramanAnchor if it isn't at ANCHOR_CONTRACT_ADDRESS yet, then exits.
+  ledger-deploy:
+    build: ./services/risk-scoring-engine
+    command: ["python", "deploy_contract.py"]
+    restart: "no"
+    env_file:
+      - ./services/risk-scoring-engine/.env
+    environment:
+      - CHAIN_RPC_URL=${PRAMAN_CHAIN_RPC_URL:-http://anvil:8545}
+    depends_on:
+      anvil:
         condition: service_healthy
 
   # Scrapes /metrics from all 4 backend services every 15s (see monitoring/prometheus.yml).
@@ -143,6 +179,7 @@ services:
       - prometheus
 
 volumes:
+  pramaan-anvil-data:
   pramaan-postgres-data:
   pramaan-prometheus-data:
   pramaan-grafana-data:

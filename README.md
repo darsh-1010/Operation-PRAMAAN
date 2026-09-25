@@ -60,6 +60,11 @@ and plain-language reason codes.
               + plain-language reason codes
 ```
 
+Every final decision is then fingerprinted and anchored on a blockchain (Merkle root per batch,
+no personal data on-chain), so any later edit or deletion of a decision is detectable. See
+[services/risk-scoring-engine/LEDGER.md](services/risk-scoring-engine/LEDGER.md) and the
+frontend's **Blockchain Ledger** tab.
+
 Full diagram: `SIH26188_Architecture_Flow_Diagram.pdf` (not committed — ask a team lead for it).
 
 ## Structure

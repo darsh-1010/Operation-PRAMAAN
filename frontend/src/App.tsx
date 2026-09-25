@@ -6,12 +6,14 @@ import { generateRecentCases } from './mock'
 import { runScreening } from './screening'
 import StatisticsTab from './tabs/StatisticsTab'
 import NewScreeningTab from './tabs/NewScreeningTab'
+import LedgerTab from './tabs/LedgerTab'
 import { useTheme } from './theme'
 import type { ScreeningCase } from './types'
 
 const TAB_COPY: Record<Tab, { title: string; subtitle: string }> = {
   stats: { title: 'Statistics', subtitle: 'Live risk assessment across all checkpoints' },
   screening: { title: 'New Screening', subtitle: 'Upload documents and biometrics to run a check' },
+  ledger: { title: 'Blockchain Ledger', subtitle: 'Tamper-evident audit trail of every screening decision' },
 }
 
 export default function App() {
@@ -40,6 +42,8 @@ export default function App() {
         <main className="flex-1 px-4 sm:px-6 py-6">
           {tab === 'stats' ? (
             <StatisticsTab cases={cases} />
+          ) : tab === 'ledger' ? (
+            <LedgerTab />
           ) : (
             <NewScreeningTab onRun={handleRun} loading={loading} result={active} onBack={() => setTab('stats')} />
           )}

@@ -1,4 +1,5 @@
 import type { ScreeningCase } from '../types'
+import LedgerProof from './LedgerProof'
 import ModuleResultCard from './ModuleResultCard'
 
 const DECISION_STYLE = {
@@ -100,6 +101,8 @@ export default function DecisionPanel({ result }: { result: ScreeningCase | null
           </div>
         </div>
       )}
+
+      <LedgerProof key={result.id} uuid={result.id} />
     </div>
   )
 }
