@@ -65,6 +65,17 @@ class QualityConfig:
 
 
 @dataclass
+class VectorSearchConfig:
+    blacklist_match_threshold: float = 0.60
+
+
+@dataclass
+class MilvusConfig:
+    host: str = "milvus-standalone"
+    port: int = 19530
+
+
+@dataclass
 class BiometricConfig:
     face_model: FaceModelConfig = field(default_factory=FaceModelConfig)
     liveness: LivenessThresholds = field(default_factory=LivenessThresholds)
@@ -72,6 +83,8 @@ class BiometricConfig:
     cross_document: CrossDocumentThresholds = field(default_factory=CrossDocumentThresholds)
     fusion: FusionConfig = field(default_factory=FusionConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
+    vector_search: VectorSearchConfig = field(default_factory=VectorSearchConfig)
+    milvus: MilvusConfig = field(default_factory=MilvusConfig)
 
 
 def _apply_section(target: object, data: dict[str, Any]) -> None:
@@ -111,6 +124,11 @@ def load_config(path: str | Path | None = None) -> BiometricConfig:
         _apply_section(cfg.fusion, raw["fusion"])
     if "quality" in raw:
         _apply_section(cfg.quality, raw["quality"])
+    if "vector_search" in raw:
+        _apply_section(cfg.vector_search, raw["vector_search"])
+    if "milvus" in raw:
+        _apply_section(cfg.milvus, raw["milvus"])
 
     logger.info("Loaded biometric config from %s", path)
     return cfg
+
