@@ -29,22 +29,24 @@ def _check_watchlist(hits: List[WatchlistHitResult], reasons: List[ReasonCode], 
     if not hits:
         return False
     for hit in hits:
+        # A NAME_ONLY possible match (no date of birth to confirm it) is flagged for an officer,
+        # not rejected — module_screen turns it into review_required.
         reasons.append(ReasonCode(
-            code=f"WATCHLIST_HIT_{hit.kind}",
+            code=f"WATCHLIST_HIT_{hit.kind}" if hit.is_hard_fail else f"WATCHLIST_POSSIBLE_{hit.kind}",
             message=f"Flagged on {hit.source} watchlist: {hit.reason}",
-            severity="CRITICAL",
-            contribution=1.0,
+            severity="CRITICAL" if hit.is_hard_fail else "HIGH",
+            contribution=1.0 if hit.is_hard_fail else 0.0,
         ))
         checks.append(ValidationCheckRecord(
             check_type="WATCHLIST_LOOKUP",
-            field_key="document_number",
-            status="FAIL",
-            is_hard_fail=True,
+            field_key="document_number" if hit.match_basis == "DOC_NUMBER" else "name",
+            status="FAIL" if hit.is_hard_fail else "WARN",
+            is_hard_fail=hit.is_hard_fail,
             expected_value="NOT_ON_WATCHLIST",
             observed_value=hit.kind,
-            detail=hit.reason,
+            detail=f"{hit.reason} ({hit.match_basis}, score {hit.match_score})",
         ))
-    return True
+    return any(hit.is_hard_fail for hit in hits)
 
 
 def _check_mrz(mrz: Any, reasons: List[ReasonCode], checks: List[ValidationCheckRecord]) -> bool:

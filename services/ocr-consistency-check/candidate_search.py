@@ -6,10 +6,14 @@ matching extracted ID credentials and screens against national/Interpol watchlis
 
 from __future__ import annotations
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from rapidfuzz import fuzz
+
 from db import DatabaseManager
+from normalizer import normalize_date
 
 logger = logging.getLogger("candidate_search")
 
@@ -89,48 +93,65 @@ class CandidateSearchEngine:
         return candidates
 
     def screen_watchlist(self, document_number: Optional[str], full_name: Optional[str], dob: Optional[str]) -> List[WatchlistHitResult]:
-        """Screen extracted identity against active watchlists and blacklists."""
+        """Screen an extracted identity against every active watchlist entry.
+
+        * Document number: exact after dropping spaces/dashes/punctuation → hard fail.
+        * Name: order-insensitive fuzzy match (normalize_watchlist_name + rapidfuzz) so a stored
+          "KHAN, DAWOOD" matches OCR's "DAWOOD KHAN" and spelling variants (Mohammed/Mohammad)
+          or small OCR slips still hit. Then the date of birth decides:
+            same DOB            → hard fail (NAME_DOB)
+            DOB not available   → possible match, officer review, NOT a reject (NAME_ONLY) —
+                                  common names would otherwise reject innocent travellers
+            different DOB       → not a hit.
+        One hit per entry at most (a document-number hit wins).
+
+        ponytail: scans all active entries in Python (fine to tens of thousands); for a national-
+        scale list move the name match into Postgres with pg_trgm + an index.
+        """
+        rows = self.db.query(
+            "SELECT entry_id, kind, doc_number, full_name, dob, reason, source "
+            "FROM watchlist_entries WHERE CAST(active AS INTEGER) = 1"
+        )
+        doc_key = normalize_doc_number(document_number)
+        name_key = normalize_watchlist_name(full_name)
+        dob_key = normalize_date(dob) if dob else None
         hits: List[WatchlistHitResult] = []
-
-        # Check 1: Document number match
-        if document_number:
-            clean_num = document_number.strip().upper()
-            sql_doc = """
-                SELECT entry_id, kind, doc_number, reason, source
-                FROM watchlist_entries
-                WHERE CAST(active AS INTEGER) = 1 AND UPPER(TRIM(doc_number)) = %s;
-            """
-            doc_rows = self.db.query(sql_doc, (clean_num,))
-            for r in doc_rows:
+        for r in rows:
+            hit = None
+            if doc_key and normalize_doc_number(r.get("doc_number")) == doc_key:
+                hit = ("DOC_NUMBER", 1.0, True, "Watchlist document match")
+            elif name_key and r.get("full_name"):
+                score = fuzz.token_sort_ratio(name_key, normalize_watchlist_name(r["full_name"])) / 100.0
+                entry_dob = normalize_date(r.get("dob")) if r.get("dob") else None
+                if score >= NAME_MATCH_THRESHOLD:
+                    if dob_key and entry_dob:
+                        if dob_key == entry_dob:
+                            hit = ("NAME_DOB", round(score, 4), True, "Watchlist person match by name and date of birth")
+                    else:
+                        hit = ("NAME_ONLY", round(score, 4), False, "Possible watchlist name match — date of birth unavailable, verify manually")
+            if hit:
+                basis, score, hard, default_reason = hit
                 hits.append(WatchlistHitResult(
-                    entry_id=str(r["entry_id"]),
-                    kind=str(r["kind"]),
-                    match_basis="DOC_NUMBER",
-                    match_score=1.0,
-                    reason=str(r.get("reason", "Watchlist document match")),
-                    source=str(r.get("source", "NATIONAL_DB")),
-                    is_hard_fail=True,
+                    entry_id=str(r["entry_id"]), kind=str(r["kind"]), match_basis=basis, match_score=score,
+                    reason=str(r.get("reason") or default_reason), source=str(r.get("source") or "NATIONAL_DB"),
+                    is_hard_fail=hard,
                 ))
-
-        # Check 2: Name and DOB match
-        if full_name and dob:
-            clean_name = full_name.strip().upper()
-            sql_person = """
-                SELECT entry_id, kind, full_name, reason, source
-                FROM watchlist_entries
-                WHERE CAST(active AS INTEGER) = 1 AND UPPER(TRIM(full_name)) = %s AND dob = %s;
-            """
-            person_rows = self.db.query(sql_person, (clean_name, dob))
-            for r in person_rows:
-                hits.append(WatchlistHitResult(
-                    entry_id=str(r["entry_id"]),
-                    kind=str(r["kind"]),
-                    match_basis="NAME_DOB",
-                    match_score=0.95,
-                    reason=str(r.get("reason", "Watchlist person match by Name & DOB")),
-                    source=str(r.get("source", "INTERPOL")),
-                    is_hard_fail=True,
-                ))
-
         return hits
 
+
+NAME_MATCH_THRESHOLD = 0.90
+
+
+# Names never contain digits, so a digit in an OCR'd name is a misread letter.
+_OCR_DIGIT_TO_LETTER = str.maketrans("0158", "OISB")
+
+
+def normalize_watchlist_name(name: Optional[str]) -> str:
+    """'Khan, Dawood' / 'DAWOOD  KHAN.' / 'DAW0OD KHAN' → 'DAWOOD KHAN' (letters only, uppercase,
+    words sorted)."""
+    words = re.sub(r"[^A-Z\u0900-\u097F ]", " ", (name or "").upper().translate(_OCR_DIGIT_TO_LETTER)).split()
+    return " ".join(sorted(words))
+
+
+def normalize_doc_number(number: Optional[str]) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (number or "").upper())

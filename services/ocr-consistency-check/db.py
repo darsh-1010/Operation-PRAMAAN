@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 import psycopg2.extras
+import schema
 from db_repository import DbRepositoryMixin
 
 logger = logging.getLogger("db")
@@ -42,9 +43,17 @@ class DatabaseManager(DbRepositoryMixin):
                 conn = psycopg2.connect(host=host, port=port, dbname=db, user=user, password=pwd, connect_timeout=5)
             conn.autocommit = True
             logger.info("Connected to PostgreSQL '%s' at %s:%s.", db, host, port)
-            return conn
         except Exception as err:
             raise RuntimeError(f"PostgreSQL connection failed — cannot start without a database: {err}") from err
+        with conn.cursor() as cur:
+            # Every uvicorn worker (and loky OCR worker) connects on its own; the advisory lock
+            # serializes the idempotent DDL so concurrent CREATE ... IF NOT EXISTS can't race.
+            cur.execute("SELECT pg_advisory_lock(hashtext('ocr_consistency_check_schema'))")
+            try:
+                schema.apply(cur)
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(hashtext('ocr_consistency_check_schema'))")
+        return conn
 
     @property
     def is_postgres(self) -> bool:

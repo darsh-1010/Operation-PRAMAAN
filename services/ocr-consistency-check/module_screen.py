@@ -63,15 +63,25 @@ def _screen_document(key: str, filename: str, content: bytes, force_tesseract: b
     return ingested, ocr_res, parsed, decision, watchlist_hits, idv
 
 
+# After PaddleOCR crashes, go straight to Tesseract for this long before trying Paddle again.
+# Each crash costs a dead worker plus a fresh model load (10-50s), and on a build where Paddle
+# segfaults it does so on every image — retrying it per document made every screening slow.
+PADDLE_RETRY_AFTER_SECONDS = int(os.environ.get("PADDLE_RETRY_AFTER_SECONDS", "600"))
+_paddle_down_until = 0.0  # per uvicorn worker process
+
+
 async def _screen_isolated(key: str, filename: str, content: bytes) -> tuple:
     """PaddleOCR is known to segfault on some builds (reproduced on aarch64 Docker): a native
     crash can't be caught in-process and used to kill the whole server worker. Run it in an
-    isolated process; if that process dies, retry once with Tesseract instead."""
-    try:
-        return await run_isolated(_screen_document, key, filename, content)
-    except InferenceCrashed as err:
-        logger.error("OCR worker crashed on %s (%s) — retrying with Tesseract", key, err)
-        return await run_isolated(_screen_document, key, filename, content, True)
+    isolated process; if that process dies, use Tesseract (and keep using it for a while)."""
+    global _paddle_down_until
+    if time.time() >= _paddle_down_until:
+        try:
+            return await run_isolated(_screen_document, key, filename, content)
+        except InferenceCrashed as err:
+            _paddle_down_until = time.time() + PADDLE_RETRY_AFTER_SECONDS
+            logger.error("OCR worker crashed on %s (%s) — using Tesseract for the next %ss", key, err, PADDLE_RETRY_AFTER_SECONDS)
+    return await run_isolated(_screen_document, key, filename, content, True)
 
 
 def _keep_evidence(session: str, uploads: list) -> tuple[list[str], list[str]]:
@@ -143,7 +153,7 @@ async def _finish(session: str, db, uploads: list, results: list, evidence_refs:
         parsed_docs.append(parsed)
         canonical_scores.append(decision.canonical_score)
         hard_fail |= decision.hard_fail
-        review_required |= idv.review_required
+        review_required |= idv.review_required or any(not h.is_hard_fail for h in watchlist_hits)
         reason_codes.extend(r.code for r in decision.reason_codes)
         all_checks.extend(decision.validation_checks)
         id_docs.append({"slot": key, "detected_type": idv.subtype, "review_required": idv.review_required})

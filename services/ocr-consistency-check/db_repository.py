@@ -9,7 +9,8 @@ logger = logging.getLogger("db")
 
 
 class DbRepositoryMixin:
-    """Methods for Module 1 table write operations."""
+    """Methods for Module 1 table write operations. Table layout: schema.py (TEXT ids/dates,
+    INTEGER 0/1 flags, JSON stored as text) — so no enum/date/jsonb casts here."""
 
     execute: Callable[..., None]
     query: Callable[..., List[Dict[str, Any]]]
@@ -18,7 +19,7 @@ class DbRepositoryMixin:
         self.execute(
             """
             INSERT INTO screening_sessions (session_id, status, pipeline_version, started_at)
-            VALUES (%s, %s::session_status, %s, now())
+            VALUES (%s, %s, %s, now())
             ON CONFLICT (session_id) DO UPDATE SET status = EXCLUDED.status;
             """,
             (session_id, status, pipeline_version),
@@ -33,7 +34,7 @@ class DbRepositoryMixin:
             """
             INSERT INTO documents (document_id, session_id, doc_type, issuing_country,
                  document_number, claimed_name, claimed_dob, claimed_expiry, claimed_gender, uploaded_at)
-            VALUES (%s, %s, %s::document_type, %s, %s, %s, %s::date, %s::date, %s, now())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (document_id) DO NOTHING;
             """,
             (document_id, session_id, doc_type, issuing_country, document_number, claimed_name, claimed_dob or None, claimed_expiry or None, claimed_gender),
@@ -46,7 +47,7 @@ class DbRepositoryMixin:
         rows = self.query(
             """
             INSERT INTO captures (session_id, document_id, kind, storage_uri, sha256, mime_type, width_px, height_px, captured_at)
-            VALUES (%s, %s, %s::capture_kind, %s, %s, %s, %s, %s, now()) RETURNING capture_id::text;
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now()) RETURNING capture_id::text;
             """,
             (session_id, document_id, kind, storage_uri, sha256, mime_type, width_px, height_px),
         )
@@ -70,7 +71,7 @@ class DbRepositoryMixin:
         self.execute(
             """
             INSERT INTO extracted_fields (extraction_id, document_id, field_key, field_value, source, confidence, bbox, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, now());
+            VALUES (%s, %s, %s, %s, %s, %s, %s, now());
             """,
             (extraction_id, document_id, field_key, field_value, source, round(confidence, 4), json.dumps(bbox) if bbox else None),
         )
@@ -82,9 +83,9 @@ class DbRepositoryMixin:
         self.execute(
             """
             INSERT INTO validation_checks (document_id, module, check_type, field_key, status, is_hard_fail, expected_value, observed_value, detail, created_at)
-            VALUES (%s, %s, %s, %s, %s::check_status, %s, %s, %s, %s, now());
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now());
             """,
-            (document_id, module, check_type, field_key, status, is_hard_fail, expected_value or None, observed_value or None, detail),
+            (document_id, module, check_type, field_key, status, int(is_hard_fail), expected_value or None, observed_value or None, detail),
         )
 
     def insert_watchlist_hit(
@@ -95,14 +96,14 @@ class DbRepositoryMixin:
             INSERT INTO watchlist_hits (session_id, document_id, entry_id, match_basis, match_score, is_hard_fail, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, now());
             """,
-            (session_id, document_id, entry_id, match_basis, round(match_score, 4), is_hard_fail),
+            (session_id, document_id, entry_id, match_basis, round(match_score, 4), int(is_hard_fail)),
         )
 
     def upsert_module_score(self, session_id: str, score_kind: str, value: float, detail: Optional[Dict[str, Any]] = None) -> None:
         self.execute(
             """
             INSERT INTO module_scores (session_id, score_kind, value, detail, created_at)
-            VALUES (%s, %s, %s, %s::jsonb, now())
+            VALUES (%s, %s, %s, %s, now())
             ON CONFLICT (session_id, score_kind) DO UPDATE SET value = EXCLUDED.value, detail = EXCLUDED.detail;
             """,
             (session_id, score_kind, round(value, 4), json.dumps(detail) if detail else None),
@@ -114,7 +115,7 @@ class DbRepositoryMixin:
         self.execute(
             """
             INSERT INTO audit_log (session_id, actor_type, action, entity_type, entity_id, payload, created_at)
-            VALUES (%s, 'SYSTEM', %s, %s, %s::uuid, %s::jsonb, now());
+            VALUES (%s, 'SYSTEM', %s, %s, %s, %s, now());
             """,
             (session_id, action, entity_type, entity_id, json.dumps(payload) if payload else None),
         )
