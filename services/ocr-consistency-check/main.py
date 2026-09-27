@@ -13,6 +13,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -55,6 +56,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Exposes /metrics (request count/latency/in-flight, per route+status) for Prometheus.
+Instrumentator().instrument(app).expose(app)
 
 # Per-client limit on /screen (rate_limit.py) — defined long ago but never applied until now.
 app.state.limiter = limiter

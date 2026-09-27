@@ -97,6 +97,18 @@ fusion) — see each service's README, and [BUILDING_A_MODULE.md](BUILDING_A_MOD
 extending a detection module's logic. `docker-compose.yml` at the repo root runs everything
 together for local dev.
 
+Each service's `.env.example` needs copying to `.env` — but the 3 detection modules'
+`RISK_ENGINE_TOKEN` and risk-scoring-engine's `RISK_TOKEN_OCR`/`RISK_TOKEN_FORENSICS`/
+`RISK_TOKEN_BIOMETRIC` ship blank or as a placeholder (see `auth.py`): leave them unset and
+risk-scoring-engine silently refuses every module's result with 503, so screenings look
+"stuck" with no obvious error in the frontend. Generate one real token per module and copy
+it into both that module's `.env` and the matching `RISK_TOKEN_*` slot in
+risk-scoring-engine's `.env`:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(36))"
+```
+
 ## Security
 
 This system takes document/selfie uploads from the public. See [SECURITY.md](SECURITY.md)

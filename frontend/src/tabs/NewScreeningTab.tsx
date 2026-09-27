@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import DecisionPanel from '../components/DecisionPanel'
 import Dropzone from '../components/Dropzone'
-import { DOCUMENT_SLOTS, type DocKey } from '../lib/documents'
+import { DOCUMENT_SLOTS, REQUIRED_KEYS, type DocKey } from '../lib/documents'
 
 import type { ScreeningCase } from '../types'
 
@@ -32,8 +32,10 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
     return (file: File | null) => setFiles((prev) => ({ ...prev, [key]: file ?? undefined }))
   }
 
-  // A live selfie is mandatory: without it nothing binds the person standing here to the document.
-  const canRun = Boolean(files[docType] && files.selfie)
+  // Every required slot (not just the one currently selected) must be filled — a document type
+  // switch never clears a previously uploaded file, so this is purely "what's still missing."
+  const missingKeys = REQUIRED_KEYS.filter((k) => !files[k])
+  const canRun = missingKeys.length === 0
 
   return (
     <div className="space-y-6">
@@ -62,13 +64,17 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
                   key={slot.key}
                   type="button"
                   onClick={() => setDocType(slot.key)}
-                  className={`rounded-lg px-3 py-2.5 text-sm font-semibold text-left transition-colors cursor-pointer ${
+                  className={`flex items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold text-left transition-colors cursor-pointer ${
                     docType === slot.key
                       ? 'bg-accent text-accent-fg'
                       : 'border border-border bg-surface-2 hover:border-accent/60'
                   }`}
                 >
-                  {slot.label}
+                  <span>
+                    {slot.label}
+                    {slot.required && <span className="text-danger"> *</span>}
+                  </span>
+                  {files[slot.key] && <span className="shrink-0 text-success">✓</span>}
                 </button>
               ))}
             </div>
@@ -77,11 +83,11 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
           <section className="rounded-xl border border-border p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-text-dim mb-3">2 · Document image</p>
             <Dropzone
-              key={docType}
               label={DOCUMENT_SLOTS.find((s) => s.key === docType)!.label}
               hint={DOCUMENT_SLOTS.find((s) => s.key === docType)!.hint}
               accept="image/*"
               required
+              value={files[docType] ?? null}
               onFile={setFile(docType)}
               facingMode="environment"
             />
@@ -131,7 +137,11 @@ export default function NewScreeningTab({ onRun, loading, result, onBack }: Prop
         </div>
 
         <div className="mt-5 flex flex-col sm:flex-row sm:justify-end items-center gap-3">
-          {!canRun && !loading && <p className="text-xs text-text-dim">Add the document image and capture a live selfie to continue</p>}
+          {!canRun && !loading && (
+            <p className="text-xs text-text-dim">
+              Still missing: {missingKeys.map((k) => (k === 'selfie' ? 'live selfie' : DOCUMENT_SLOTS.find((s) => s.key === k)!.label)).join(', ')}
+            </p>
+          )}
           {canRun && !loading && <p className="text-xs text-success font-medium">Ready to run</p>}
           <button
             onClick={() => onRun(files)}

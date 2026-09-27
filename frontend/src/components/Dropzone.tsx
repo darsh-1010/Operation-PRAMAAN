@@ -8,6 +8,9 @@ interface Props {
   accept: string
   required?: boolean
   onFile: (file: File | null) => void
+  /** Current file for this slot, owned by the parent. Lets a document-type switcher show each
+   *  slot's own upload status instead of a single dropzone that forgets what was in it. */
+  value?: File | null
   /** 'box' (default): big dashed drag & drop area with Choose file + Webcam buttons.
    *  'compact': a two-button row (e.g. "Capture selfie" / "Upload") with no drop area — used
    *  where screen space is tight, like the selfie slot. */
@@ -25,12 +28,13 @@ export default function Dropzone({
   accept,
   required,
   onFile,
+  value,
   variant = 'box',
   webcamLabel = 'Webcam',
   facingMode = 'environment',
   cameraOnly = false,
 }: Props) {
-  const [file, setFile] = useState<File | null>(null)
+  const [file, setFile] = useState<File | null>(value ?? null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [checking, setChecking] = useState(false)
@@ -38,6 +42,13 @@ export default function Dropzone({
   const [showWebcam, setShowWebcam] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const allowVideo = accept.includes('video')
+
+  // A controlled slot (Props.value passed): reflect whatever the parent is holding for this
+  // slot right now, so switching which document type is "active" shows that slot's own file
+  // instead of an empty dropzone that looks like the upload was lost.
+  useEffect(() => {
+    if (value !== undefined) setFile(value)
+  }, [value])
 
   useEffect(() => {
     if (!file || !/^(image|video)\//.test(file.type)) {
