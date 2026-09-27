@@ -74,6 +74,25 @@ def convert_bs_year_to_gregorian(bs_year: int) -> Tuple[int, str]:
     return g_start, f"{g_start}-{g_end}"
 
 
+def convert_gregorian_to_bs(gregorian_date_str: str) -> Optional[str]:
+    """Convert an ISO YYYY-MM-DD Gregorian date to Bikram Sambat (YYYY-MM-DD)."""
+    try:
+        import nepali_datetime
+        parts = str(gregorian_date_str)[:10].split("-")
+        dt = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+        bs_dt = nepali_datetime.date.from_datetime_date(dt)
+        return bs_dt.strftime("%Y-%m-%d")
+    except Exception:
+        try:
+            parts = str(gregorian_date_str)[:10].split("-")
+            ad_y, ad_m, ad_d = int(parts[0]), int(parts[1]), int(parts[2])
+            bs_y = ad_y + 57 if ad_m >= 4 else ad_y + 56
+            bs_m = ((ad_m + 8) % 12) or 12
+            return f"{bs_y}-{bs_m:02d}-{min(ad_d, 30):02d}"
+        except Exception:
+            return None
+
+
 def _bs_to_ad_date(bs_y: int, bs_m: int, bs_d: int) -> Optional[str]:
     """Convert (year, month, day) in BS to ISO Gregorian string."""
     try:

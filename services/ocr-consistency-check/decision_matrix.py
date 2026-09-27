@@ -1,10 +1,10 @@
 """Scoring and Decision Matrix Engine.
 
 Calculates Module 1 (Score A) across identity elements:
-- MRZ / Format Integrity: 35%
-- VIZ vs MRZ Consistency: 35%
-- Expiry / Validity: 20%
-- Extraction Completeness: 10%
+- MRZ / Format Integrity: 50%
+- Expiry / Validity: 30%
+- Extraction Completeness: 20%
+(VIZ extraction and VIZ-MRZ crosscheck shifted to dedicated module)
 """
 
 from __future__ import annotations
@@ -132,24 +132,6 @@ def evaluate_decision_matrix(
     if extracted.mrz_result and _check_mrz(extracted.mrz_result, reasons, checks):
         hard_fail = True
 
-    if not extracted.viz_mrz_consistent:
-        incon_desc = "; ".join(extracted.inconsistencies)
-        reasons.append(ReasonCode(
-            code="VIZ_MRZ_INCONSISTENCY",
-            message=f"Discrepancy between printed text and MRZ: {incon_desc}",
-            severity="HIGH",
-            contribution=0.35,
-        ))
-        checks.append(ValidationCheckRecord(
-            check_type="BARCODE_CROSSCHECK",
-            field_key="cross_check",
-            status="WARN",
-            is_hard_fail=False,
-            expected_value="MATCH",
-            observed_value="MISMATCH",
-            detail=incon_desc,
-        ))
-
     expiry_str = (
         match.candidate.expiry_date
         if match and match.has_candidate and match.candidate and match.candidate.expiry_date
@@ -176,11 +158,10 @@ def evaluate_decision_matrix(
         ))
 
     mrz_int = 0.0 if (extracted.mrz_result and extracted.mrz_result.has_checksum_failure) else (1.0 if extracted.document_number else 0.6)
-    cons_sc = 1.0 if extracted.viz_mrz_consistent else 0.35
     val_sc = 0.0 if is_doc_expired else 1.0
     comp_sc = (0.5 if extracted.document_number else 0.0) + (0.5 if extracted.claimed_name else 0.0)
 
-    sub_scores = {"mrz_integrity": mrz_int, "viz_mrz_consistency": cons_sc, "validity": val_sc, "completeness": comp_sc}
+    sub_scores = {"mrz_integrity": mrz_int, "validity": val_sc, "completeness": comp_sc}
 
     if hard_fail:
         canonical_score, status = 0.0, "NOT VERIFIED"
@@ -189,7 +170,7 @@ def evaluate_decision_matrix(
         canonical_score = round(max(0.0, min(1.0, weighted)), 4)
         status = "VERIFIED" if canonical_score >= 0.85 else ("NEEDS REVIEW" if canonical_score >= 0.60 else "NOT VERIFIED")
     else:
-        weighted = (0.35 * mrz_int) + (0.35 * cons_sc) + (0.20 * val_sc) + (0.10 * comp_sc)
+        weighted = (0.50 * mrz_int) + (0.30 * val_sc) + (0.20 * comp_sc)
         canonical_score = round(max(0.0, min(1.0, weighted)), 4)
         status = "VERIFIED" if canonical_score >= 0.85 else ("NEEDS REVIEW" if canonical_score >= 0.60 else "NOT VERIFIED")
 

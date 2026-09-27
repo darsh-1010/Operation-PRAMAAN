@@ -7,6 +7,7 @@ SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SERVICE_DIR not in sys.path:
     sys.path.insert(0, SERVICE_DIR)
 
+from nepali_calendar import convert_bikram_sambat, convert_gregorian_to_bs
 from normalizer import normalize_bikram_sambat_date
 
 
@@ -17,6 +18,18 @@ class TestBikramSambatConversion(unittest.TestCase):
 
     def test_dmy_format(self):
         self.assertEqual(normalize_bikram_sambat_date("25/04/2082"), "2025-08-10")
+
+    def test_convert_bikram_sambat_structured(self):
+        res = convert_bikram_sambat("2082-04-25")
+        self.assertTrue(res.is_valid)
+        self.assertEqual(res.gregorian_date, "2025-08-10")
+        self.assertEqual(res.bs_year, 2082)
+        self.assertEqual(res.bs_month, 4)
+        self.assertEqual(res.bs_day, 25)
+
+    def test_convert_gregorian_to_bs(self):
+        bs_str = convert_gregorian_to_bs("2025-08-10")
+        self.assertEqual(bs_str, "2082-04-25")
 
     def test_none_input(self):
         self.assertIsNone(normalize_bikram_sambat_date(None))

@@ -1,24 +1,19 @@
-"""Unit tests for robust identity name extraction and MRZ candidate ranking."""
+"""Unit tests for MRZ identity name extraction and MRZ candidate ranking."""
 
 from __future__ import annotations
 import unittest
 
-from field_extractor import extract_document_fields, _extract_positional_national_id_name
+from field_extractor import extract_document_fields
 from mrz_verifier import extract_and_verify_mrz
 from ocr_engine import OCRResult, TextBlock
 
 
 class TestNameExtraction(unittest.TestCase):
-    def test_us_visa_avoids_control_number(self):
-        """Ensure 'Issuing Post Name' does not match 'Control Number' as person's name."""
+    def test_td3_passport_mrz_name_extraction(self):
+        """Ensure full name is extracted from TD3 passport MRZ."""
         lines = [
-            "SS Issuing Post Name Control Number CES",
-            "LONDON LND1234567890",
-            "Surname CAMPBELL",
-            "Given Name AMELIA ROSE",
-            "Passport Number A12345678",
-            "Sex F Birth Date 22NOV1996",
-            "Issue Date 22MAY2023 Expiration Date 22NOV2023",
+            "P<INDMAHESH<<KUMAR<<<<<<<<<<<<<<<<<<<<<<<<<<",
+            "Z1234567<8IND8501055M3001018<<<<<<<<<<<<<<<2",
         ]
         ocr_res = OCRResult(
             blocks=[TextBlock(text=l, confidence=0.95, bbox={"x": 0, "y": 0, "w": 100, "h": 20}) for l in lines],
@@ -29,22 +24,16 @@ class TestNameExtraction(unittest.TestCase):
             average_confidence=0.95,
         )
         parsed = extract_document_fields(ocr_res)
-        self.assertIsNotNone(parsed.claimed_name)
-        self.assertNotIn("CONTROL", parsed.claimed_name.upper())
-        self.assertNotIn("NUMBER", parsed.claimed_name.upper())
-        self.assertIn("CAMPBELL", parsed.claimed_name)
-        self.assertIn("AMELIA", parsed.claimed_name)
+        self.assertEqual(parsed.claimed_name, "MAHESH KUMAR")
+        self.assertEqual(parsed.document_number, "Z1234567")
+        self.assertEqual(parsed.doc_type, "PASSPORT")
 
-    def test_passport_surname_and_given_name_joining(self):
-        """Ensure separate Surname and Given Name fields are merged into full name."""
+    def test_td1_national_id_mrz_name_extraction(self):
+        """Ensure full name is extracted from TD1 3-line MRZ."""
         lines = [
-            "REPUBLIC OF INDIA PASSPORT",
-            "Surname / उपनाम",
-            "PATEL",
-            "Given Name(s) / दिए गए नाम",
-            "MAHESH KUMAR",
-            "Nationality INDIAN",
-            "Sex M Date of Birth 05/01/1985",
+            "I<UTOD231458907<<<<<<<<<<<<<<<",
+            "7408122F1204159UTO<<<<<<<<<<<6",
+            "ERIKSSON<<ANNA<MARIA<<<<<<<<<<",
         ]
         ocr_res = OCRResult(
             blocks=[TextBlock(text=l, confidence=0.95, bbox={"x": 0, "y": 0, "w": 100, "h": 20}) for l in lines],
@@ -55,22 +44,18 @@ class TestNameExtraction(unittest.TestCase):
             average_confidence=0.95,
         )
         parsed = extract_document_fields(ocr_res)
-        self.assertEqual(parsed.claimed_name, "PATEL MAHESH KUMAR")
+        self.assertEqual(parsed.claimed_name, "ERIKSSON ANNA MARIA")
+        self.assertEqual(parsed.document_number, "D23145890")
+        self.assertEqual(parsed.doc_type, "NATIONAL_ID")
 
-    def test_aadhaar_positional_name_extraction(self):
-        """Ensure Aadhaar layout without 'NAME:' label extracts the person's name."""
+    def test_non_mrz_document_returns_none_for_identity_fields(self):
+        """Ensure non-MRZ document does not extract visual text as identity fields (VIZ moved to other module)."""
         lines = [
             "Government of India",
-            "भारत सरकार",
-            "आरव पटेल",
             "Aarav Patel",
             "DOB: 15/08/1990",
-            "पुरुष / MALE",
             "3508 0660 6149",
         ]
-        extracted = _extract_positional_national_id_name(lines)
-        self.assertEqual(extracted, "Aarav Patel")
-
         ocr_res = OCRResult(
             blocks=[TextBlock(text=l, confidence=0.95, bbox={"x": 0, "y": 0, "w": 100, "h": 20}) for l in lines],
             full_text="\n".join(lines),
@@ -80,8 +65,8 @@ class TestNameExtraction(unittest.TestCase):
             average_confidence=0.95,
         )
         parsed = extract_document_fields(ocr_res)
-        self.assertEqual(parsed.claimed_name, "AARAV PATEL")
-        self.assertEqual(parsed.document_number, "350806606149")
+        self.assertIsNone(parsed.claimed_name)
+        self.assertIsNone(parsed.document_number)
 
     def test_mrz_checksum_candidate_ranking(self):
         """Ensure error-free MRZ lines are preferred over corrupted 44-character strings."""
