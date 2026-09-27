@@ -99,6 +99,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - RISK_ENGINE_URL=http://risk-scoring-engine:8004
       - EVIDENCE_DIR=/data/evidence
+      # Milvus Lite (app/vector_db.py) file-locks its db — only one process can hold it.
+      # Dockerfile's default WEB_CONCURRENCY=2 leaves one uvicorn worker permanently
+      # unable to connect, silently no-op'ing blacklist checks on that worker.
+      - WEB_CONCURRENCY=1
     volumes:
       - pramaan-evidence:/data/evidence
     depends_on:
