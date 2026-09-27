@@ -9,16 +9,28 @@ import time
 import urllib.error
 import urllib.request
 
+import cv2
+import numpy as np
 import uvicorn
 
 from main import app
 
 HOST, PORT = "127.0.0.1", 8902
-# A real 4x4 PNG — decodable, so it must pass validation.
+# A real 4x4 PNG — decodable, so it must pass validation, but too small for any voter to
+# assess (see noise_residual.MIN_DIM) — exercises the "nothing could be assessed" path.
 TINY_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000004000000040802000000269309290"
     "000001349444154789c633c6164c400034c70165e0e003c320134191895090000000049454e44ae426082"
 )
+
+
+def _real_png(size: int = 256) -> bytes:
+    """A large-enough-to-assess grayscale noise image, for exercising the real voters."""
+    rng = np.random.default_rng(1)
+    img = (128 + rng.normal(0, 4, (size, size))).clip(0, 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".png", img)
+    assert ok
+    return buf.tobytes()
 
 
 def _post_screen(documents_present: dict, files: dict) -> tuple[int, dict]:
@@ -61,13 +73,19 @@ def main() -> None:
             break
         time.sleep(0.1)
 
-    # A valid submission must return the API_CONTRACT.md response shape.
+    # Too small for any voter to assess -> the honest answer is still "not assessed" (null).
     status, result = _post_screen({"passport": True}, {"passport": TINY_PNG})
     assert status == 200, result
-    # Nothing is implemented yet, so the honest answer is "not assessed" (null), never a number.
-    assert result["score"] is None and result["reason_codes"][0].startswith("FORENSICS_NOT_IMPLEMENTED")
+    assert result["score"] is None, result
     assert isinstance(result["hard_fail"], bool)
     assert isinstance(result["reason_codes"], list)
+
+    # A real, assessable image: noise_residual actually runs now and produces a real score,
+    # even though reconstruction/tamper_model are still stubs — API_CONTRACT.md's shape holds.
+    status, result = _post_screen({"passport": True}, {"passport": _real_png()})
+    assert status == 200, result
+    assert isinstance(result["score"], (int, float)) and 0 <= result["score"] <= 100, result
+    assert result["hard_fail"] is False
 
     # A file that isn't a real image must be rejected, not silently accepted.
     status, _ = _post_screen({"passport": True}, {"passport": b"not an image"})
