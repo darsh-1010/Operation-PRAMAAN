@@ -12,7 +12,7 @@ Pipeline status:
   [x] Cross-document consistency
   [x] Liveness detection (FASNet via DeepFace)
   [x] Database persistence (Postgres via db.py)
-  [ ] Milvus integration — not yet needed
+  [x] Milvus integration (1:N Blacklist & Failure tracking)
 """
 import asyncio
 import io
@@ -35,6 +35,7 @@ from slowapi.errors import RateLimitExceeded
 import evidence
 from app.config import BiometricConfig, load_config
 from app.db import BiometricDB
+from app.vector_db import MilvusClientWrapper
 from app.domain.enums import ReasonCode
 from app.ml.preprocessing import detect_and_align, image_bytes_to_rgb
 from inference_pool import InferenceCrashed, run_isolated
@@ -103,6 +104,7 @@ MAX_VIDEO_BYTES = 50 * 1024 * 1024
 _config: BiometricConfig = load_config()
 _db = BiometricDB.get_instance()
 _cache = ResultCache(namespace="biometric")
+_milvus = MilvusClientWrapper(_config.milvus.host, _config.milvus.port)
 
 
 def validate_image(data: bytes, field: str) -> None:
@@ -296,6 +298,17 @@ async def screen(
                 elif l_score < _config.liveness.review_threshold:
                     reason_codes.append(f"selfie: {ReasonCode.LIVENESS_REVIEW_REQUIRED.value} (score={l_score:.2f})")
 
+            # 1:N Blacklist Check (Milvus)
+            if selfie_result.get("embedding") is not None and not hard_fail:
+                blacklist_match = _milvus.search_face(
+                    selfie_result["embedding"], 
+                    "blacklisted", 
+                    _config.vector_search.blacklist_match_threshold
+                )
+                if blacklist_match:
+                    reason_codes.append(f"selfie: BLACKLISTED_PERSON_DETECTED (similarity={blacklist_match['similarity']:.2f})")
+                    hard_fail = True
+
     # Process document faces (pipeline already ran concurrently above)
     for key, result in doc_results.items():
         if result.get("pipeline_error"):
@@ -421,6 +434,20 @@ async def screen(
     logger.info("uuid=%s /screen result: score=%s hard_fail=%s reasons=%s", uuid, api_score, hard_fail, reason_codes)
 
     documents_checked = list(doc_data.keys()) + (["selfie"] if selfie_data is not None else [])
+
+    # 1:N Failure Tracking (Milvus)
+    if hard_fail and selfie_result and selfie_result.get("embedding"):
+        if not any("BLACKLISTED" in r for r in reason_codes):
+            _milvus.upsert_face(uuid, selfie_result["embedding"], "failed")
+    elif not hard_fail and selfie_result and selfie_result.get("embedding"):
+        fail_match = _milvus.search_face(
+            selfie_result["embedding"], 
+            "failed", 
+            _config.vector_search.blacklist_match_threshold
+        )
+        if fail_match:
+            _milvus.delete_face_by_uuid(fail_match["uuid"])
+
     await run_in_threadpool(
         _db.save_result, str(py_uuid.uuid4()), uuid, api_score, hard_fail, reason_codes, documents_checked
     )
@@ -429,3 +456,5 @@ async def screen(
     _cache.set(fingerprint, result)
     await _notify_risk_engine(uuid, api_score, hard_fail, reason_codes + evidence_problem, evidence_refs)
     return result
+
+

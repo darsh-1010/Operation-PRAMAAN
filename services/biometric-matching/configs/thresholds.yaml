@@ -46,3 +46,10 @@ quality:
   min_reliable_quality: 0.40
   # Below this quality, never hard-fail on similarity alone
   low_quality_floor: 0.25
+
+vector_search:
+  blacklist_match_threshold: 0.60
+
+milvus:
+  host: "milvus-standalone"
+  port: 19530
